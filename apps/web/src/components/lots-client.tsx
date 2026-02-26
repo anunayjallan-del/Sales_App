@@ -246,14 +246,6 @@ export function LotsClient() {
   const [bulkActionModalOpen, setBulkActionModalOpen] = useState(false);
   const [bulkSelectedAction, setBulkSelectedAction] = useState<ActionName>("SAMPLING");
   const [bulkActionData, setBulkActionData] = useState<Record<string, unknown>>({});
-  const [repackModalOpen, setRepackModalOpen] = useState(false);
-  const [repackMark, setRepackMark] = useState("");
-  const [repackInvoiceNo, setRepackInvoiceNo] = useState("");
-  const [repackGrade, setRepackGrade] = useState("");
-  const [repackBags, setRepackBags] = useState<number | null>(null);
-  const [repackWeight, setRepackWeight] = useState<number | null>(null);
-  const [repackFactory, setRepackFactory] = useState("");
-  const [repackDate, setRepackDate] = useState("");
   const queryClient = useQueryClient();
   const router = useRouter();
   const { message, modal } = App.useApp();
@@ -309,18 +301,6 @@ export function LotsClient() {
     await queryClient.invalidateQueries({ queryKey: ["lots"] });
   };
 
-  const repackLot = useMutation({
-    mutationFn: (payload: Record<string, unknown>) =>
-      fetchJson("/api/lots/repack", {
-        method: "POST",
-        body: JSON.stringify(payload)
-      }),
-    onSuccess: async () => {
-      message.success("Lot repacked");
-      await invalidate();
-    }
-  });
-
   const deleteLot = useMutation({
     mutationFn: (lotId: string) =>
       fetchJson(`/api/lots/${lotId}`, {
@@ -368,7 +348,6 @@ export function LotsClient() {
   const rows = data?.lots ?? [];
   const totalLots = data?.total ?? 0;
   const selectedLotId = selected.length === 1 ? selected[0] : null;
-  const selectedLot = selectedLotId ? rows.find((r) => r.id === selectedLotId) : null;
 
   const gradeItems = useMemo(
     () => [
@@ -593,17 +572,50 @@ export function LotsClient() {
         }
       },
       {
-        title: "Open",
+        title: "Action",
         key: "open",
-        width: 90,
+        width: 260,
         render: (_, row) => (
-          <Link href={`/lots/${row.id}`}>
-            <Button size="small">View</Button>
-          </Link>
+          <Space size={8}>
+            <Button
+              size="small"
+              onClick={() => {
+                setSelected([row.id]);
+                setSelectedAction("SAMPLING");
+                setActionData({});
+                setActionModalOpen(true);
+              }}
+            >
+              Manage
+            </Button>
+            <Link href={`/lots/${row.id}`}>
+              <Button size="small">View</Button>
+            </Link>
+            <Button
+              size="small"
+              danger
+              loading={deleteLot.isPending}
+              onClick={() => {
+                modal.confirm({
+                  title: "Delete this lot?",
+                  content:
+                    "This will permanently delete the selected lot and linked records (auction/private/dispatch). This action cannot be undone.",
+                  okText: "Delete",
+                  okType: "danger",
+                  cancelText: "Cancel",
+                  onOk: async () => {
+                    await deleteLot.mutateAsync(row.id);
+                  }
+                });
+              }}
+            >
+              Delete
+            </Button>
+          </Space>
         )
       }
     ],
-    [bagsMax, bagsMin, gradeFilter, gradeItems, packingDateFrom, packingDateTo, statusFilter, statusItems, weightMax, weightMin]
+    [bagsMax, bagsMin, deleteLot, gradeFilter, gradeItems, modal, packingDateFrom, packingDateTo, statusFilter, statusItems, weightMax, weightMin]
   );
 
   return (
@@ -725,70 +737,6 @@ export function LotsClient() {
           scroll={{ x: 700 }}
         />
       </Card>
-
-      {selected.length === 1 && selectedLotId ? (
-        <div
-          style={{
-            position: "fixed",
-            left: "50%",
-            bottom: 16,
-            transform: "translateX(-50%)",
-            zIndex: 40,
-            width: "min(860px, calc(100vw - 24px))"
-          }}
-        >
-          <Card variant="borderless" style={{ boxShadow: "0 12px 36px rgba(0,0,0,0.18)" }}>
-            <Space wrap size={[8, 8]}>
-              <Typography.Text strong>1 lot selected</Typography.Text>
-              <Button type="primary" onClick={() => router.push(`/lots/${selectedLotId}`)}>
-                Open Lot
-              </Button>
-              <Button
-                onClick={() => {
-                  setSelectedAction("SAMPLING");
-                  setActionData({});
-                  setActionModalOpen(true);
-                }}
-              >
-                Take Action
-              </Button>
-              <Button
-                onClick={() => {
-                  setRepackMark(selectedLot?.mark ?? "");
-                  setRepackInvoiceNo("");
-                  setRepackGrade(selectedLot?.grade ?? "");
-                  setRepackBags(selectedLot?.bags ?? null);
-                  setRepackWeight(selectedLot?.net_weight_kg ?? null);
-                  setRepackFactory("");
-                  setRepackDate(new Date().toISOString().slice(0, 10));
-                  setRepackModalOpen(true);
-                }}
-              >
-                Repack
-              </Button>
-              <Button
-                danger
-                onClick={() => {
-                  modal.confirm({
-                    title: "Delete this lot?",
-                    content:
-                      "This will permanently delete the selected lot and linked records (auction/private/dispatch). This action cannot be undone.",
-                    okText: "Delete",
-                    okType: "danger",
-                    cancelText: "Cancel",
-                    onOk: async () => {
-                      await deleteLot.mutateAsync(selectedLotId);
-                    }
-                  });
-                }}
-                loading={deleteLot.isPending}
-              >
-                Delete Lot
-              </Button>
-            </Space>
-          </Card>
-        </div>
-      ) : null}
 
       {selected.length >= 2 ? (
         <div
@@ -960,37 +908,6 @@ export function LotsClient() {
         </Space>
       </Modal>
 
-      <Modal
-        title="Repack Lot"
-        open={repackModalOpen}
-        onCancel={() => setRepackModalOpen(false)}
-        onOk={async () => {
-          if (!selectedLotId || !repackMark || !repackInvoiceNo || !repackGrade || !repackBags || !repackWeight || !repackDate) return;
-          await repackLot.mutateAsync({
-            old_lot_id: selectedLotId,
-            new_lot: {
-              mark: repackMark,
-              invoice_number: repackInvoiceNo,
-              grade: repackGrade,
-              bags: repackBags,
-              net_weight_kg: repackWeight,
-              factory: repackFactory || null,
-              date_created: repackDate
-            }
-          });
-          setRepackModalOpen(false);
-        }}
-      >
-        <Space direction="vertical" style={{ width: "100%" }}>
-          <Input placeholder="New Mark" value={repackMark} onChange={(e) => setRepackMark(e.target.value)} />
-          <Input placeholder="New Lot/Invoice No." value={repackInvoiceNo} onChange={(e) => setRepackInvoiceNo(e.target.value)} />
-          <Input placeholder="Grade" value={repackGrade} onChange={(e) => setRepackGrade(e.target.value)} />
-          <InputNumber style={{ width: "100%" }} min={0} placeholder="Bags" value={repackBags ?? undefined} onChange={(v) => setRepackBags(v ?? null)} />
-          <InputNumber style={{ width: "100%" }} min={0} placeholder="Net Weight (kg)" value={repackWeight ?? undefined} onChange={(v) => setRepackWeight(v ?? null)} />
-          <Input placeholder="Factory (optional)" value={repackFactory} onChange={(e) => setRepackFactory(e.target.value)} />
-          <Input type="date" value={repackDate} onChange={(e) => setRepackDate(e.target.value)} />
-        </Space>
-      </Modal>
     </Space>
   );
 }
