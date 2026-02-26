@@ -146,13 +146,7 @@ export async function listLots(filters: {
         .filter(Boolean)
     : [];
 
-  if (statusFilters.length === 1 && statusFilters[0] === "CANCELLED") {
-    dataQuery = dataQuery.eq("is_cancelled", true);
-    countQuery = countQuery.eq("is_cancelled", true);
-  } else if (statusFilters.length === 1 && statusFilters[0] === "PENDING") {
-    dataQuery = dataQuery.eq("is_cancelled", false).eq("master_status", "ACTIVE");
-    countQuery = countQuery.eq("is_cancelled", false).eq("master_status", "ACTIVE");
-  } else if (statusFilters.length) {
+  if (statusFilters.length) {
     const { data: statusRows, error: statusErr } = await db()
       .from("lot_active_statuses")
       .select("lot_id")
@@ -164,10 +158,6 @@ export async function listLots(filters: {
     }
     dataQuery = dataQuery.in("id", ids);
     countQuery = countQuery.in("id", ids);
-  }
-  if (filters.masterStatus) {
-    dataQuery = dataQuery.eq("master_status", filters.masterStatus);
-    countQuery = countQuery.eq("master_status", filters.masterStatus);
   }
 
   const [{ data, error }, { count, error: countError }] = await Promise.all([dataQuery, countQuery]);
