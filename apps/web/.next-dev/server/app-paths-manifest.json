@@ -1,0 +1,6 @@
+{
+  "/api/lots/filter-options/route": "app/api/lots/filter-options/route.js",
+  "/api/lots/route": "app/api/lots/route.js",
+  "/dashboard/page": "app/dashboard/page.js",
+  "/lots/page": "app/lots/page.js"
+}

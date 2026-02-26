@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  background:
+    radial-gradient(circle at 0% 0%, rgba(124, 176, 88, 0.16), transparent 36%),
+    radial-gradient(circle at 100% 100%, rgba(215, 165, 98, 0.14), transparent 38%),
+    #f6f8f3;
+  min-height: 100vh;
+}
+.ant-card {
+  box-shadow: 0 8px 28px rgba(13, 23, 13, 0.06);
+  border: 1px solid #edf0e9;
+}
+
+.clickable-lot-row {
+  cursor: pointer;
+}
