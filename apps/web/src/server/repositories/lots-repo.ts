@@ -183,6 +183,7 @@ export async function listLots(filters: {
     if (upper === "HELD") return "HOLD";
     if (upper === "WITHDRAWN") return "WITHDRAW";
     if (upper === "SOLD PENDING DISPATCH") return "SOLD_PENDING_DISPATCH";
+    if (upper === "PENDING AUCTION DISPATCH") return "PENDING_AUCTION_DISPATCH";
     return upper;
   };
   const statusFilters = filters.status
@@ -481,6 +482,19 @@ export async function listLotActions(lotId: string) {
     .order("performed_at", { ascending: false });
   if (error) throw error;
   return data ?? [];
+}
+
+export async function getLatestDispatchToAuctionAction(lotId: string) {
+  const { data, error } = await db()
+    .from("lot_actions")
+    .select("*")
+    .eq("lot_id", lotId)
+    .eq("action", "DISPATCH_TO_AUCTION")
+    .order("performed_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return data;
 }
 
 export async function listSamplingActions() {

@@ -40,6 +40,7 @@ export type MasterStatus = (typeof masterStatuses)[number];
 
 export const lifecycleStatuses = [
   "PENDING",
+  "PENDING_AUCTION_DISPATCH",
   "CANCELLED",
   "SOLD_PENDING_DISPATCH",
   "SOLD_PRIVATE",
@@ -53,6 +54,7 @@ export type LifecycleStatus = (typeof lifecycleStatuses)[number];
 
 export const globalLotStatuses = [
   "PENDING",
+  "PENDING_AUCTION_DISPATCH",
   "IN_TRANSIT",
   "AWR_PENDING",
   "AWR_RECEIVED",

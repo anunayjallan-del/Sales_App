@@ -7,7 +7,9 @@ import { AppShell } from "@/components/app-shell";
 import { fetchJson } from "@/lib/fetcher";
 
 function formatStatusLabel(status: string): string {
-  return status === "SAMPLING_SENT" ? "SAMPLED" : status;
+  if (status === "SAMPLING_SENT") return "SAMPLED";
+  if (status === "PENDING_AUCTION_DISPATCH") return "PENDING AUCTION DISPATCH";
+  return status;
 }
 
 type LotDetail = {

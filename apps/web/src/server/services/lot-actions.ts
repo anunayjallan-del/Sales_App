@@ -4,6 +4,7 @@ import { GlobalLotStatus } from "@/lib/types";
 export const actionNames = [
   "SAMPLING",
   "DISPATCH_TO_AUCTION",
+  "AUCTION_DISPATCHED",
   "HOLD_AWR",
   "AWR_RECEIVED",
   "PRINT",
@@ -47,15 +48,14 @@ export const actionRules: Record<LotActionName, ActionRule> = {
     })
   },
   DISPATCH_TO_AUCTION: {
-    resultingStatus: "IN_TRANSIT",
-    allowedFrom: ["PENDING"],
+    resultingStatus: "PENDING_AUCTION_DISPATCH",
+    allowedFrom: ["PENDING", "NEGOTIATING"],
     schema: z
       .object({
-        dispatch_date: z.string().min(1),
+        advice_date: z.string().min(1),
         broker: z.string().min(1),
         warehouse: z.string().min(1),
         auction_centre: z.string().min(1),
-        transporter: z.string().optional(),
         ...commonRemark
       })
       .superRefine((value, ctx) => {
@@ -84,6 +84,15 @@ export const actionRules: Record<LotActionName, ActionRule> = {
           });
         }
       })
+  },
+  AUCTION_DISPATCHED: {
+    resultingStatus: "IN_TRANSIT",
+    allowedFrom: ["PENDING_AUCTION_DISPATCH"],
+    schema: z.object({
+      dispatch_date: z.string().min(1),
+      transporter: z.string().min(1),
+      ...commonRemark
+    })
   },
   HOLD_AWR: {
     resultingStatus: "AWR_PENDING",
@@ -183,6 +192,7 @@ export const actionRules: Record<LotActionName, ActionRule> = {
       "NEGOTIATING",
       "SAMPLING_SENT",
       "PENDING",
+      "PENDING_AUCTION_DISPATCH",
       "IN_TRANSIT",
       "AWR_PENDING",
       "AWR_RECEIVED",
@@ -268,6 +278,7 @@ export function normalizeCurrentStatus(statuses: GlobalLotStatus[]): GlobalLotSt
     "SOLD_PENDING_DISPATCH",
     "NEGOTIATING",
     "SAMPLING_SENT",
+    "PENDING_AUCTION_DISPATCH",
     "WITHDRAW",
     "HOLD",
     "REPRINT",

@@ -40,6 +40,7 @@ type LotActionRow = {
 type ActionName =
   | "SAMPLING"
   | "DISPATCH_TO_AUCTION"
+  | "AUCTION_DISPATCHED"
   | "HOLD_AWR"
   | "AWR_RECEIVED"
   | "PRINT"
@@ -74,11 +75,15 @@ const actionFieldConfig: Record<ActionName, ActionField[]> = {
     { key: "remarks", label: "Remarks", type: "text" }
   ],
   DISPATCH_TO_AUCTION: [
-    { key: "dispatch_date", label: "Date of dispatch", type: "date", required: true },
+    { key: "advice_date", label: "Advice date", type: "date", required: true },
     { key: "broker", label: "Broker", type: "text", required: true },
     { key: "warehouse", label: "Warehouse", type: "text", required: true },
     { key: "auction_centre", label: "Auction Centre", type: "text", required: true },
-    { key: "transporter", label: "Transporter", type: "text" },
+    { key: "remarks", label: "Remarks", type: "text" }
+  ],
+  AUCTION_DISPATCHED: [
+    { key: "dispatch_date", label: "Dispatch date", type: "date", required: true },
+    { key: "transporter", label: "Transporter", type: "text", required: true },
     { key: "remarks", label: "Remarks", type: "text" }
   ],
   HOLD_AWR: [
@@ -175,7 +180,9 @@ function formatActionName(action: ActionName): string {
 }
 
 function formatStatusLabel(status: string): string {
-  return status === "SAMPLING_SENT" ? "SAMPLED" : status;
+  if (status === "SAMPLING_SENT") return "SAMPLED";
+  if (status === "PENDING_AUCTION_DISPATCH") return "PENDING AUCTION DISPATCH";
+  return status;
 }
 
 const modalSelectProps = {
@@ -342,6 +349,7 @@ export function LotsClient() {
   const { message, modal } = App.useApp();
 
   const pageSize = 20;
+  const selectedLotId = selected.length === 1 ? selected[0] : null;
 
   const { data: filterOptions } = useQuery({
     queryKey: ["lot-filter-options"],
@@ -399,6 +407,11 @@ export function LotsClient() {
     queryFn: () => fetchJson<{ rows: LotActionRow[] }>(`/api/lots/${samplingHistoryLotId}/actions`),
     enabled: Boolean(samplingHistoryLotId)
   });
+  const { data: manageLotActionsData, isLoading: manageLotActionsLoading } = useQuery({
+    queryKey: ["lot-actions-manage", selectedLotId],
+    queryFn: () => fetchJson<{ rows: LotActionRow[] }>(`/api/lots/${selectedLotId}/actions`),
+    enabled: Boolean(selectedLotId) && actionDetailsModalOpen && selectedAction === "AUCTION_DISPATCHED"
+  });
 
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ["lots"] });
@@ -418,12 +431,15 @@ export function LotsClient() {
 
   const runAction = useMutation({
     mutationFn: (payload: { lotId: string; action: ActionName; data: Record<string, unknown> }) =>
-      fetchJson(`/api/lots/${payload.lotId}/actions`, {
+      fetchJson<{ warnings?: string[] }>(`/api/lots/${payload.lotId}/actions`, {
         method: "POST",
         body: JSON.stringify({ action: payload.action, data: payload.data })
       }),
-    onSuccess: async () => {
+    onSuccess: async (response) => {
       message.success("Action executed");
+      if (response?.warnings?.includes("DISPATCH_ADVICE_MISSING")) {
+        message.warning("Dispatch advice not found for this lot. Please review.");
+      }
       await invalidate();
       setActionDetailsModalOpen(false);
       setActionData({});
@@ -450,7 +466,6 @@ export function LotsClient() {
 
   const rows = data?.lots ?? [];
   const totalLots = data?.total ?? 0;
-  const selectedLotId = selected.length === 1 ? selected[0] : null;
   const selectedLotRow = rows.find((row) => row.id === selectedLotId) ?? null;
   const samplingHistoryLot = rows.find((row) => row.id === samplingHistoryLotId) ?? null;
   const samplingHistoryRows = useMemo(() => {
@@ -486,6 +501,20 @@ export function LotsClient() {
     [samplingHistoryRows]
   );
   const sampledDateCount = samplingHistoryRows.length;
+  const latestDispatchAdvicePayload = useMemo(() => {
+    const rows = manageLotActionsData?.rows ?? [];
+    for (const row of rows) {
+      if (row.action !== "DISPATCH_TO_AUCTION") continue;
+      const payload = (row.payload ?? {}) as Record<string, unknown>;
+      return {
+        advice_date: String(payload.advice_date ?? ""),
+        broker: String(payload.broker ?? ""),
+        warehouse: String(payload.warehouse ?? ""),
+        auction_centre: String(payload.auction_centre ?? "")
+      };
+    }
+    return null;
+  }, [manageLotActionsData?.rows]);
 
   const gradeItems = useMemo(
     () => [
@@ -499,6 +528,7 @@ export function LotsClient() {
     const selected = new Set(statusFilter);
     const statuses = [
       { key: "PENDING", label: "PENDING" },
+      { key: "PENDING_AUCTION_DISPATCH", label: "PENDING_AUCTION_DISPATCH" },
       { key: "IN_TRANSIT", label: "IN_TRANSIT" },
       { key: "AWR_PENDING", label: "AWR_PENDING" },
       { key: "AWR_RECEIVED", label: "AWR_RECEIVED" },
@@ -1110,6 +1140,46 @@ export function LotsClient() {
                 </Typography.Text>
               </Space>
             </Card>
+            {selectedAction === "AUCTION_DISPATCHED" ? (
+              <Card
+                size="small"
+                style={{
+                  background: latestDispatchAdvicePayload ? "#f6ffed" : "#fff2e8",
+                  borderColor: latestDispatchAdvicePayload ? "#b7eb8f" : "#ffbb96"
+                }}
+              >
+                <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                  <Typography.Text strong>Dispatch Advice Context</Typography.Text>
+                  {!latestDispatchAdvicePayload && !manageLotActionsLoading ? (
+                    <Typography.Text type="warning">
+                      Dispatch advice not found; proceed carefully.
+                    </Typography.Text>
+                  ) : null}
+                  {manageLotActionsLoading ? (
+                    <Typography.Text type="secondary">Loading dispatch advice...</Typography.Text>
+                  ) : (
+                    <Row gutter={[10, 8]}>
+                      <Col span={12}>
+                        <Typography.Text type="secondary">Advice date</Typography.Text>
+                        <div>{latestDispatchAdvicePayload?.advice_date || "-"}</div>
+                      </Col>
+                      <Col span={12}>
+                        <Typography.Text type="secondary">Broker</Typography.Text>
+                        <div>{latestDispatchAdvicePayload?.broker || "-"}</div>
+                      </Col>
+                      <Col span={12}>
+                        <Typography.Text type="secondary">Warehouse</Typography.Text>
+                        <div>{latestDispatchAdvicePayload?.warehouse || "-"}</div>
+                      </Col>
+                      <Col span={12}>
+                        <Typography.Text type="secondary">Auction Centre</Typography.Text>
+                        <div>{latestDispatchAdvicePayload?.auction_centre || "-"}</div>
+                      </Col>
+                    </Row>
+                  )}
+                </Space>
+              </Card>
+            ) : null}
 
             <Row gutter={[12, 12]}>
               {actionFieldConfig[selectedAction].map((field) => (
@@ -1120,7 +1190,10 @@ export function LotsClient() {
                       {field.required ? " *" : ""}
                     </Typography.Text>
                     {field.type === "text" ? (
-                      field.key === "broker" ? (
+                      selectedAction === "AUCTION_DISPATCHED" &&
+                      (field.key === "broker" || field.key === "warehouse" || field.key === "auction_centre" || field.key === "advice_date") ? (
+                        <Input value={String(latestDispatchAdvicePayload?.[field.key as keyof typeof latestDispatchAdvicePayload] ?? "")} readOnly />
+                      ) : field.key === "broker" ? (
                         <Select
                           showSearch
                           optionFilterProp="label"
@@ -1151,12 +1224,16 @@ export function LotsClient() {
                       )
                     ) : null}
                     {field.type === "date" ? (
-                      <Input
-                        type="date"
-                        value={String(actionData[field.key] ?? "")}
-                        onChange={(e) => setActionData((prev) => ({ ...prev, [field.key]: e.target.value }))}
-                        onClick={(e) => tryOpenDatePicker(e.currentTarget)}
-                      />
+                      selectedAction === "AUCTION_DISPATCHED" && field.key === "advice_date" ? (
+                        <Input value={String(latestDispatchAdvicePayload?.advice_date ?? "")} readOnly />
+                      ) : (
+                        <Input
+                          type="date"
+                          value={String(actionData[field.key] ?? "")}
+                          onChange={(e) => setActionData((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                          onClick={(e) => tryOpenDatePicker(e.currentTarget)}
+                        />
+                      )
                     ) : null}
                     {field.type === "number" ? (
                       <InputNumber

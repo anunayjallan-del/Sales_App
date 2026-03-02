@@ -5,6 +5,7 @@ import {
   addLotStatusEvent,
   createLotAction,
   getActiveStatusesForLots,
+  getLatestDispatchToAuctionAction,
   getLotWithRelations,
   listLotActions,
   replaceLotActiveStatuses
@@ -122,6 +123,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const resultingStatusForAudit = isLifecycleTransition && nextStatus ? nextStatus : currentStatus;
     const resultingStatuses = isLifecycleTransition && nextStatus ? [nextStatus] : activeStatuses;
     const warnings = deriveWarnings(resultingStatuses);
+    if (parsed.data.action === "AUCTION_DISPATCHED") {
+      const latestPrepared = await getLatestDispatchToAuctionAction(id);
+      if (!latestPrepared) {
+        warnings.push("DISPATCH_ADVICE_MISSING");
+      }
+    }
     const actionRow = await createLotAction({
       lotId: id,
       action: parsed.data.action,

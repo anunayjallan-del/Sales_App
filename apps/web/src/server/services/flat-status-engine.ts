@@ -1,6 +1,7 @@
 import { AuctionStatus, GlobalLotStatus, PrivateDealStatus } from "@/lib/types";
 
 const auctionProgression: GlobalLotStatus[] = [
+  "PENDING_AUCTION_DISPATCH",
   "IN_TRANSIT",
   "AWR_PENDING",
   "AWR_RECEIVED",
@@ -16,6 +17,7 @@ const auctionProgression: GlobalLotStatus[] = [
 
 const privateProgression: GlobalLotStatus[] = ["SAMPLING_SENT", "NEGOTIATING", "SOLD_PENDING_DISPATCH", "SOLD"];
 const auctionActiveForConflict = new Set<GlobalLotStatus>([
+  "PENDING_AUCTION_DISPATCH",
   "IN_TRANSIT",
   "AWR_PENDING",
   "AWR_RECEIVED",
@@ -148,4 +150,3 @@ export function isPrivateStatusAllowedForDispatch(status: PrivateDealStatus): bo
 }
 
 export { auctionProgression, privateProgression };
-
