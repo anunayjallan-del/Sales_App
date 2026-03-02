@@ -11,6 +11,17 @@ import { resolveLifecycleStatus } from "@/server/services/status-engine";
 
 const db = () => getSupabaseAdmin();
 
+const defaultBrokerNames = [
+  "Nandkishore Pareek",
+  "Associated Brokers",
+  "Amitashish Enterprises",
+  "Nilesh Shah",
+  "Pawan Chawla",
+  "Select Commodities",
+  "Anand Bafna",
+  "Parcon"
+] as const;
+
 function deriveFactoryFromMark(mark: string): string | null {
   const normalized = mark.trim().toUpperCase();
   if (normalized === "ABHOYJAN" || normalized === "ABHOYBARII") return "Abhoyjan";
@@ -90,12 +101,32 @@ export async function listLots(filters: {
   const to = from + filters.pageSize - 1;
 
   const searchClause = filters.search ? `invoice_number.ilike.%${filters.search}%` : null;
+  const normalizeStatusFilter = (value: string) => {
+    const raw = value.trim();
+    const upper = raw.toUpperCase();
+    if (upper === "SAMPLED") return "SAMPLING_SENT";
+    if (upper === "ARRIVED BUT HELD") return "AWR_PENDING";
+    if (upper === "ARRIVED") return "AWR_RECEIVED";
+    if (upper === "PRINTED") return "CATALOGUED";
+    if (upper === "RESERVE PRICE SET") return "RESERVE_SET";
+    if (upper === "OUT LOT") return "OUT";
+    if (upper === "REPRINTED") return "REPRINT";
+    if (upper === "HELD") return "HOLD";
+    if (upper === "WITHDRAWN") return "WITHDRAW";
+    if (upper === "SOLD PENDING DISPATCH") return "SOLD_PENDING_DISPATCH";
+    return upper;
+  };
+  const statusFilters = filters.status
+    ? filters.status
+        .split(",")
+        .map((s) => normalizeStatusFilter(s))
+        .filter(Boolean)
+    : [];
 
   let dataQuery = db()
     .from("lots")
     .select("*, auction_tracks(*), private_deals(*, buyers(name))")
-    .order("date_created", { ascending: true })
-    .range(from, to);
+    .order("date_created", { ascending: true });
 
   let countQuery = db().from("lots").select("id", { count: "exact", head: true });
 
@@ -139,39 +170,75 @@ export async function listLots(filters: {
     dataQuery = dataQuery.lte("date_created", filters.packingDateTo);
     countQuery = countQuery.lte("date_created", filters.packingDateTo);
   }
-  const statusFilters = filters.status
-    ? filters.status
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean)
-    : [];
-
-  if (statusFilters.length) {
-    const { data: statusRows, error: statusErr } = await db()
-      .from("lot_active_statuses")
-      .select("lot_id")
-      .in("status", statusFilters);
-    if (statusErr) throw statusErr;
-    const ids = Array.from(new Set((statusRows ?? []).map((row) => row.lot_id)));
-    if (ids.length === 0) {
-      return { lots: [], total: 0 };
-    }
-    dataQuery = dataQuery.in("id", ids);
-    countQuery = countQuery.in("id", ids);
+  if (!statusFilters.length) {
+    dataQuery = dataQuery.range(from, to);
+    const [{ data, error }, { count, error: countError }] = await Promise.all([dataQuery, countQuery]);
+    if (error) throw error;
+    if (countError) throw countError;
+    const lotRows = (data ?? []).map((lot) => ({
+      ...lot,
+      factory: lot.factory ?? deriveFactoryFromMark(lot.mark)
+    }));
+    const activeByLot = await getActiveStatusesForLots(lotRows.map((l) => l.id));
+    const lots = lotRows.map((lot) =>
+      withFlatStatuses(withComputedLifecycle(lot), activeByLot.get(lot.id) ?? null)
+    );
+    return { lots, total: count ?? 0 };
   }
 
-  const [{ data, error }, { count, error: countError }] = await Promise.all([dataQuery, countQuery]);
-  if (error) throw error;
-  if (countError) throw countError;
-  const lotRows = (data ?? []).map((lot) => ({
+  // For status filtering, compute using both persisted active statuses and fallback derived statuses
+  // so filtering matches what UI displays.
+  const buildStatusBaseQuery = () => {
+    let query = db()
+      .from("lots")
+      .select("*, auction_tracks(*), private_deals(*, buyers(name))")
+      .order("date_created", { ascending: true });
+    if (searchClause) query = query.or(searchClause);
+    if (filters.grade) query = query.eq("grade", filters.grade);
+    if (filters.mark) query = query.eq("mark", filters.mark);
+    if (filters.factory) query = query.eq("factory", filters.factory);
+    if (filters.bagsMin !== undefined) query = query.gte("bags", filters.bagsMin);
+    if (filters.bagsMax !== undefined) query = query.lte("bags", filters.bagsMax);
+    if (filters.weightMin !== undefined) query = query.gte("net_weight_kg", filters.weightMin);
+    if (filters.weightMax !== undefined) query = query.lte("net_weight_kg", filters.weightMax);
+    if (filters.packingDateFrom) query = query.gte("date_created", filters.packingDateFrom);
+    if (filters.packingDateTo) query = query.lte("date_created", filters.packingDateTo);
+    return query;
+  };
+
+  const chunkSize = 1000;
+  const allData: Array<Record<string, unknown>> = [];
+  let start = 0;
+  while (true) {
+    const { data: chunk, error: chunkError } = await buildStatusBaseQuery().range(start, start + chunkSize - 1);
+    if (chunkError) throw chunkError;
+    if (!chunk?.length) break;
+    allData.push(...chunk);
+    if (chunk.length < chunkSize) break;
+    start += chunkSize;
+  }
+
+  const allLotRows = allData.map((lot) => ({
     ...lot,
-    factory: lot.factory ?? deriveFactoryFromMark(lot.mark)
+    factory: (lot.factory as string | null) ?? deriveFactoryFromMark(String(lot.mark ?? ""))
   }));
-  const activeByLot = await getActiveStatusesForLots(lotRows.map((l) => l.id));
-  const lots = lotRows.map((lot) =>
+  const activeByLot = await getActiveStatusesForLots(allLotRows.map((l) => l.id));
+  const enriched = allLotRows.map((lot) =>
     withFlatStatuses(withComputedLifecycle(lot), activeByLot.get(lot.id) ?? null)
   );
-  return { lots, total: count ?? 0 };
+  const filtered = enriched.filter((lot) => {
+    const statuses = lot.active_statuses ?? [];
+    return statuses.some((s) => statusFilters.includes(s));
+  });
+  if (process.env.NODE_ENV !== "production") {
+    console.log("[listLots:status]", {
+      statusFilters,
+      baseLots: allLotRows.length,
+      filteredLots: filtered.length
+    });
+  }
+  const paged = filtered.slice(from, to + 1);
+  return { lots: paged, total: filtered.length };
 }
 
 export async function getLotWithRelations(lotId: string) {
@@ -325,6 +392,16 @@ export async function listLotActions(lotId: string) {
   return data ?? [];
 }
 
+export async function listSamplingActions() {
+  const { data, error } = await db()
+    .from("lot_actions")
+    .select("id,lot_id,action,payload,performed_at,lots(mark,invoice_number,grade)")
+    .eq("action", "SAMPLING")
+    .order("performed_at", { ascending: false });
+  if (error) throw error;
+  return data ?? [];
+}
+
 export async function getPrivateDealById(id: string) {
   const { data, error } = await db().from("private_deals").select("*").eq("id", id).single();
   if (error) throw error;
@@ -334,15 +411,33 @@ export async function getPrivateDealById(id: string) {
 export async function getActiveStatusesForLots(lotIds: string[]) {
   const result = new Map<string, GlobalLotStatus[]>();
   if (!lotIds.length) return result;
-  const { data, error } = await db()
-    .from("lot_active_statuses")
-    .select("lot_id,status")
-    .in("lot_id", lotIds);
-  if (error) throw error;
-  for (const row of data ?? []) {
-    const arr = result.get(row.lot_id) ?? [];
-    arr.push(row.status as GlobalLotStatus);
-    result.set(row.lot_id, arr);
+  // Avoid oversized `in(...)` query strings for large lot sets.
+  if (lotIds.length > 300) {
+    const lotIdSet = new Set(lotIds);
+    const { data, error } = await db().from("lot_active_statuses").select("lot_id,status");
+    if (error) throw error;
+    for (const row of data ?? []) {
+      if (!lotIdSet.has(row.lot_id)) continue;
+      const arr = result.get(row.lot_id) ?? [];
+      arr.push(row.status as GlobalLotStatus);
+      result.set(row.lot_id, arr);
+    }
+    return result;
+  }
+
+  const chunkSize = 100;
+  for (let i = 0; i < lotIds.length; i += chunkSize) {
+    const chunk = lotIds.slice(i, i + chunkSize);
+    const { data, error } = await db()
+      .from("lot_active_statuses")
+      .select("lot_id,status")
+      .in("lot_id", chunk);
+    if (error) throw error;
+    for (const row of data ?? []) {
+      const arr = result.get(row.lot_id) ?? [];
+      arr.push(row.status as GlobalLotStatus);
+      result.set(row.lot_id, arr);
+    }
   }
   return result;
 }
@@ -351,14 +446,16 @@ export async function replaceLotActiveStatuses(lotId: string, statuses: GlobalLo
   const { error: deleteError } = await db().from("lot_active_statuses").delete().eq("lot_id", lotId);
   if (deleteError) throw deleteError;
 
-  if (!statuses.length) return;
+  const uniqueStatuses = Array.from(new Set(statuses));
+  if (!uniqueStatuses.length) return;
   const now = new Date().toISOString();
-  const { error: insertError } = await db().from("lot_active_statuses").insert(
-    statuses.map((status) => ({
+  const { error: insertError } = await db().from("lot_active_statuses").upsert(
+    uniqueStatuses.map((status) => ({
       lot_id: lotId,
       status,
       since_at: now
-    }))
+    })),
+    { onConflict: "lot_id,status" }
   );
   if (insertError) throw insertError;
 }
@@ -503,6 +600,37 @@ export async function listLotFilterOptions() {
     marks: Array.from(marks).sort((a, b) => a.localeCompare(b)),
     factories: Array.from(factories).sort((a, b) => a.localeCompare(b)),
     grades: Array.from(grades).sort((a, b) => a.localeCompare(b))
+  };
+}
+
+export async function listPartyOptions() {
+  const [{ data: buyers, error: buyersErr }, { data: actions, error: actionsErr }] = await Promise.all([
+    db().from("buyers").select("name").order("name", { ascending: true }),
+    db().from("lot_actions").select("payload")
+  ]);
+  if (buyersErr) throw buyersErr;
+  if (actionsErr) throw actionsErr;
+
+  const buyerNames = new Set<string>();
+  const brokerNames = new Set<string>();
+
+  for (const row of buyers ?? []) {
+    const name = String(row.name ?? "").trim();
+    if (name) buyerNames.add(name);
+  }
+
+  for (const row of actions ?? []) {
+    const payload = (row.payload ?? {}) as Record<string, unknown>;
+    const broker = String(payload.broker ?? "").trim();
+    if (broker) brokerNames.add(broker);
+  }
+  for (const broker of defaultBrokerNames) {
+    brokerNames.add(broker);
+  }
+
+  return {
+    buyers: Array.from(buyerNames).sort((a, b) => a.localeCompare(b)),
+    brokers: Array.from(brokerNames).sort((a, b) => a.localeCompare(b))
   };
 }
 

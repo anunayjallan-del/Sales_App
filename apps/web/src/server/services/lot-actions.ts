@@ -30,11 +30,15 @@ type ActionRule = {
 };
 
 const commonRemark = { remarks: z.string().optional() };
+const diptiWarehouse = "Dipti Tea Warehouse";
+const nowalWarehouse = "Nowal Tea Warehouse";
+const kolkataCentre = "Kolkata";
+const guwahatiCentre = "Guwahati";
 
 export const actionRules: Record<LotActionName, ActionRule> = {
   SAMPLING: {
     resultingStatus: "SAMPLING_SENT",
-    allowedFrom: ["PENDING", "IN_TRANSIT", "AWR_PENDING", "AWR_RECEIVED", "CATALOGUED", "HOLD", "OUT", "WITHDRAW"],
+    allowedFrom: ["PENDING", "IN_TRANSIT", "AWR_PENDING", "AWR_RECEIVED", "CATALOGUED", "HOLD", "OUT", "WITHDRAW", "SAMPLING_SENT"],
     schema: z.object({
       parties: z.array(z.string().min(1)).min(1),
       sampling_date: z.string().min(1),
@@ -44,14 +48,41 @@ export const actionRules: Record<LotActionName, ActionRule> = {
   DISPATCH_TO_AUCTION: {
     resultingStatus: "IN_TRANSIT",
     allowedFrom: ["PENDING"],
-    schema: z.object({
-      dispatch_date: z.string().min(1),
-      broker: z.string().min(1),
-      warehouse: z.string().min(1),
-      auction_centre: z.string().min(1),
-      transporter: z.string().optional(),
-      ...commonRemark
-    })
+    schema: z
+      .object({
+        dispatch_date: z.string().min(1),
+        broker: z.string().min(1),
+        warehouse: z.string().min(1),
+        auction_centre: z.string().min(1),
+        transporter: z.string().optional(),
+        ...commonRemark
+      })
+      .superRefine((value, ctx) => {
+        const warehouse = value.warehouse.trim();
+        const centre = value.auction_centre.trim();
+        const broker = value.broker.trim();
+        if (warehouse === diptiWarehouse && centre !== kolkataCentre) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["auction_centre"],
+            message: `${diptiWarehouse} must map to ${kolkataCentre}.`
+          });
+        }
+        if (warehouse === nowalWarehouse && centre !== guwahatiCentre) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["auction_centre"],
+            message: `${nowalWarehouse} must map to ${guwahatiCentre}.`
+          });
+        }
+        if (broker === "Associated Brokers" && warehouse !== diptiWarehouse) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["warehouse"],
+            message: "Associated Brokers must map to Dipti Tea Warehouse."
+          });
+        }
+      })
   },
   HOLD_AWR: {
     resultingStatus: "AWR_PENDING",

@@ -6,6 +6,10 @@ import { App, Button, Card, Col, Descriptions, Empty, Row, Space, Spin, Tag, Typ
 import { AppShell } from "@/components/app-shell";
 import { fetchJson } from "@/lib/fetcher";
 
+function formatStatusLabel(status: string): string {
+  return status === "SAMPLING_SENT" ? "SAMPLED" : status;
+}
+
 type LotDetail = {
   id: string;
   mark: string;
@@ -57,7 +61,7 @@ export default function LotDetailPage() {
                     <Space wrap>
                       {(lot.active_statuses ?? [lot.lifecycle_status ?? "PENDING"]).map((s) => (
                         <Tag key={s} color={s === "CANCELLED" ? "red" : s === "CLOSED" ? "blue" : "green"}>
-                          {s}
+                          {formatStatusLabel(s)}
                         </Tag>
                       ))}
                       {(lot.warnings ?? []).map((w) => (
@@ -107,7 +111,7 @@ export default function LotDetailPage() {
               {(lot.status_events ?? []).length === 0 ? <Empty description="No status events yet" /> : null}
               {(lot.status_events ?? []).map((evt) => (
                 <Space key={evt.id} style={{ justifyContent: "space-between", width: "100%" }}>
-                  <Tag>{evt.status}</Tag>
+                  <Tag>{formatStatusLabel(evt.status)}</Tag>
                   <Typography.Text type="secondary">{new Date(evt.effective_at).toLocaleString()}</Typography.Text>
                   <Typography.Text type="secondary">{evt.source}</Typography.Text>
                 </Space>
@@ -121,7 +125,7 @@ export default function LotDetailPage() {
               {(lot.actions ?? []).map((a) => (
                 <Space key={a.id} style={{ justifyContent: "space-between", width: "100%" }}>
                   <Typography.Text>{a.action.replaceAll("_", " ")}</Typography.Text>
-                  <Tag color="green">{a.resulting_status}</Tag>
+                  <Tag color="green">{formatStatusLabel(a.resulting_status)}</Tag>
                   <Typography.Text type="secondary">{new Date(a.performed_at).toLocaleString()}</Typography.Text>
                 </Space>
               ))}

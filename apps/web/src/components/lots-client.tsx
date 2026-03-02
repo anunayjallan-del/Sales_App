@@ -5,8 +5,8 @@ import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 import type { ColumnsType } from "antd/es/table";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { FilterOutlined } from "@ant-design/icons";
-import { App, Button, Card, Col, Dropdown, Input, InputNumber, Modal, Popover, Row, Select, Space, Table, Tag, Typography } from "antd";
+import { CheckOutlined, FilterOutlined } from "@ant-design/icons";
+import { App, Button, Card, Checkbox, Col, Dropdown, Input, InputNumber, Modal, Popover, Row, Select, Space, Table, Tag, Typography } from "antd";
 import { fetchJson } from "@/lib/fetcher";
 
 type LotRow = {
@@ -48,9 +48,18 @@ type ActionName =
 
 type ActionField = { key: string; label: string; type: "text" | "date" | "number" | "tags"; required?: boolean };
 
+const WAREHOUSE_OPTIONS = ["Dipti Tea Warehouse", "Nowal Tea Warehouse"] as const;
+const AUCTION_CENTRE_OPTIONS = ["Kolkata", "Guwahati"] as const;
+const DISPATCH_BROKER_OPTIONS = ["Parcon", "Associated Brokers"] as const;
+const AUCTION_CENTRE_BY_WAREHOUSE: Record<string, string> = {
+  "Dipti Tea Warehouse": "Kolkata",
+  "Nowal Tea Warehouse": "Guwahati"
+};
+const ASSOCIATED_BROKER = "Associated Brokers";
+
 const actionFieldConfig: Record<ActionName, ActionField[]> = {
   SAMPLING: [
-    { key: "parties", label: "Parties (buyers/brokers)", type: "tags", required: true },
+    { key: "parties", label: "Parties", type: "tags", required: true },
     { key: "sampling_date", label: "Date of sampling", type: "date", required: true },
     { key: "remarks", label: "Remarks", type: "text" }
   ],
@@ -147,6 +156,73 @@ const actionFieldConfig: Record<ActionName, ActionField[]> = {
   ]
 };
 
+function formatActionName(action: ActionName): string {
+  return action
+    .toLowerCase()
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function formatStatusLabel(status: string): string {
+  return status === "SAMPLING_SENT" ? "SAMPLED" : status;
+}
+
+const modalSelectProps = {
+  style: { width: "100%" as const },
+  listHeight: 420,
+  popupMatchSelectWidth: false as const,
+  styles: { popup: { root: { minWidth: 420 } } }
+};
+
+function todayIsoDate(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function buildInitialActionData(action: ActionName): Record<string, unknown> {
+  const fields = actionFieldConfig[action] ?? [];
+  const initial: Record<string, unknown> = {};
+  for (const field of fields) {
+    if (field.type === "date") {
+      initial[field.key] = todayIsoDate();
+    }
+  }
+  return initial;
+}
+
+function applyDispatchMappings(
+  current: Record<string, unknown>,
+  key: string,
+  value: string
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...current, [key]: value };
+  if (key === "broker" && value === ASSOCIATED_BROKER) {
+    next.warehouse = "Dipti Tea Warehouse";
+    next.auction_centre = AUCTION_CENTRE_BY_WAREHOUSE["Dipti Tea Warehouse"];
+  }
+  if (key === "warehouse") {
+    const mapped = AUCTION_CENTRE_BY_WAREHOUSE[value];
+    if (mapped) next.auction_centre = mapped;
+  }
+  return next;
+}
+
+function uniqueNameOptions(names: string[]): Array<{ label: string; value: string }> {
+  return Array.from(new Set(names.map((name) => String(name).trim()).filter(Boolean)))
+    .sort((a, b) => a.localeCompare(b))
+    .map((name) => ({ label: name, value: name }));
+}
+
+function tryOpenDatePicker(input: HTMLInputElement) {
+  const pickerInput = input as HTMLInputElement & { showPicker?: () => void };
+  if (!pickerInput.showPicker) return;
+  try {
+    pickerInput.showPicker();
+  } catch {
+    // Some browsers require stricter gesture context; fallback is native date input behavior.
+  }
+}
+
 function parsePackingDate(value: string): Date | null {
   if (!value) return null;
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
@@ -240,12 +316,15 @@ export function LotsClient() {
   const [statusFilter, setStatusFilter] = useState<string[]>([]);
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<string[]>([]);
-  const [actionModalOpen, setActionModalOpen] = useState(false);
+  const [actionSelectModalOpen, setActionSelectModalOpen] = useState(false);
+  const [actionDetailsModalOpen, setActionDetailsModalOpen] = useState(false);
   const [selectedAction, setSelectedAction] = useState<ActionName>("SAMPLING");
   const [actionData, setActionData] = useState<Record<string, unknown>>({});
+  const [partySearch, setPartySearch] = useState("");
   const [bulkActionModalOpen, setBulkActionModalOpen] = useState(false);
   const [bulkSelectedAction, setBulkSelectedAction] = useState<ActionName>("SAMPLING");
   const [bulkActionData, setBulkActionData] = useState<Record<string, unknown>>({});
+  const [bulkPartySearch, setBulkPartySearch] = useState("");
   const queryClient = useQueryClient();
   const router = useRouter();
   const { message, modal } = App.useApp();
@@ -255,6 +334,10 @@ export function LotsClient() {
   const { data: filterOptions } = useQuery({
     queryKey: ["lot-filter-options"],
     queryFn: () => fetchJson<{ marks: string[]; factories: string[]; grades: string[] }>("/api/lots/filter-options")
+  });
+  const { data: partyOptions } = useQuery({
+    queryKey: ["party-options"],
+    queryFn: () => fetchJson<{ buyers: string[]; brokers: string[] }>("/api/parties/options")
   });
 
   const lotsQuery = useMemo(() => {
@@ -322,7 +405,7 @@ export function LotsClient() {
     onSuccess: async () => {
       message.success("Action executed");
       await invalidate();
-      setActionModalOpen(false);
+      setActionDetailsModalOpen(false);
       setActionData({});
     }
   });
@@ -357,9 +440,9 @@ export function LotsClient() {
     [filterOptions?.grades]
   );
 
-  const statusItems = useMemo(
-    () => [
-      { key: "__ALL__", label: "All statuses" },
+  const statusItems = useMemo(() => {
+    const selected = new Set(statusFilter);
+    const statuses = [
       { key: "PENDING", label: "PENDING" },
       { key: "IN_TRANSIT", label: "IN_TRANSIT" },
       { key: "AWR_PENDING", label: "AWR_PENDING" },
@@ -372,19 +455,29 @@ export function LotsClient() {
       { key: "HOLD", label: "HOLD" },
       { key: "REPRINT", label: "REPRINT" },
       { key: "WITHDRAW", label: "WITHDRAW" },
-      { key: "SAMPLING_SENT", label: "SAMPLING_SENT" },
+      { key: "SAMPLING_SENT", label: "SAMPLED" },
       { key: "NEGOTIATING", label: "NEGOTIATING" },
       { key: "SOLD_PENDING_DISPATCH", label: "SOLD_PENDING_DISPATCH" },
       { key: "SOLD", label: "SOLD" },
       { key: "CANCELLED", label: "Cancelled" },
       { key: "CLOSED", label: "CLOSED" }
-    ],
-    []
-  );
+    ];
+    return [
+      {
+        key: "__ALL__",
+        label: "All statuses",
+        icon: selected.size === 0 ? <CheckOutlined /> : undefined
+      },
+      ...statuses.map((item) => ({
+        ...item,
+        icon: selected.has(item.key) ? <CheckOutlined /> : undefined
+      }))
+    ];
+  }, [statusFilter]);
   const actionOptions = useMemo(
     () =>
       (Object.keys(actionFieldConfig) as ActionName[]).map((action) => ({
-        label: action.replaceAll("_", " "),
+        label: formatActionName(action),
         value: action
       })),
     []
@@ -393,6 +486,37 @@ export function LotsClient() {
     () =>
       actionOptions.filter((option) => option.value !== "REINVOICED"),
     [actionOptions]
+  );
+  const samplingPartyOptions = useMemo(
+    () => uniqueNameOptions([...(partyOptions?.buyers ?? []), ...(partyOptions?.brokers ?? [])]),
+    [partyOptions?.buyers, partyOptions?.brokers]
+  );
+  const filteredSamplingPartyOptions = useMemo(() => {
+    const q = partySearch.trim().toLowerCase();
+    if (!q) return samplingPartyOptions;
+    return samplingPartyOptions.filter((option) => String(option.label).toLowerCase().includes(q));
+  }, [partySearch, samplingPartyOptions]);
+  const filteredBulkSamplingPartyOptions = useMemo(() => {
+    const q = bulkPartySearch.trim().toLowerCase();
+    if (!q) return samplingPartyOptions;
+    return samplingPartyOptions.filter((option) => String(option.label).toLowerCase().includes(q));
+  }, [bulkPartySearch, samplingPartyOptions]);
+  const brokerSelectOptions = useMemo(
+    () => uniqueNameOptions(partyOptions?.brokers ?? []),
+    [partyOptions?.brokers]
+  );
+  const dispatchBrokerSelectOptions = useMemo(
+    () =>
+      brokerSelectOptions.filter((option) => DISPATCH_BROKER_OPTIONS.includes(String(option.value) as (typeof DISPATCH_BROKER_OPTIONS)[number])),
+    [brokerSelectOptions]
+  );
+  const warehouseSelectOptions = useMemo(
+    () => WAREHOUSE_OPTIONS.map((name) => ({ label: name, value: name })),
+    []
+  );
+  const auctionCentreSelectOptions = useMemo(
+    () => AUCTION_CENTRE_OPTIONS.map((name) => ({ label: name, value: name })),
+    []
   );
 
   const columns: ColumnsType<LotRow> = useMemo(
@@ -559,7 +683,7 @@ export function LotsClient() {
             <Space size={[4, 4]} wrap>
               {statuses.map((s) => (
                 <Tag key={`${row.id}-${s}`} color={s === "CANCELLED" ? "red" : s === "CLOSED" ? "blue" : "green"}>
-                  {s}
+                  {formatStatusLabel(s)}
                 </Tag>
               ))}
               {(row.warnings ?? []).map((w) => (
@@ -582,8 +706,8 @@ export function LotsClient() {
               onClick={() => {
                 setSelected([row.id]);
                 setSelectedAction("SAMPLING");
-                setActionData({});
-                setActionModalOpen(true);
+                setActionData(buildInitialActionData("SAMPLING"));
+                setActionSelectModalOpen(true);
               }}
             >
               Manage
@@ -755,11 +879,11 @@ export function LotsClient() {
               <Button
                 onClick={() => {
                   setBulkSelectedAction("SAMPLING");
-                  setBulkActionData({});
+                  setBulkActionData(buildInitialActionData("SAMPLING"));
                   setBulkActionModalOpen(true);
                 }}
               >
-                Bulk Take Action
+                Bulk Manage Lot
               </Button>
               <Button onClick={() => setSelected([])}>Clear Selection</Button>
             </Space>
@@ -768,9 +892,32 @@ export function LotsClient() {
       ) : null}
 
       <Modal
-        title="Take Action"
-        open={actionModalOpen}
-        onCancel={() => setActionModalOpen(false)}
+        title="Manage Lot"
+        open={actionSelectModalOpen}
+        onCancel={() => setActionSelectModalOpen(false)}
+        onOk={() => {
+          setActionSelectModalOpen(false);
+          setActionDetailsModalOpen(true);
+        }}
+      >
+        <Space direction="vertical" style={{ width: "100%" }}>
+          <Typography.Text type="secondary">Select the action</Typography.Text>
+          <Select
+            value={selectedAction}
+            onChange={(v) => {
+              setSelectedAction(v);
+              setActionData(buildInitialActionData(v));
+            }}
+            options={actionOptions}
+            {...modalSelectProps}
+          />
+        </Space>
+      </Modal>
+
+      <Modal
+        title={`Manage Lot - ${selectedAction.replaceAll("_", " ")}`}
+        open={actionDetailsModalOpen}
+        onCancel={() => setActionDetailsModalOpen(false)}
         onOk={async () => {
           if (!selectedLotId) return;
           const required = actionFieldConfig[selectedAction].filter((f) => f.required);
@@ -792,14 +939,6 @@ export function LotsClient() {
         okButtonProps={{ loading: runAction.isPending }}
       >
         <Space direction="vertical" style={{ width: "100%" }}>
-          <Select
-            value={selectedAction}
-            onChange={(v) => {
-              setSelectedAction(v);
-              setActionData({});
-            }}
-            options={actionOptions}
-          />
           {actionFieldConfig[selectedAction].map((field) => (
             <div key={field.key}>
               <Typography.Text type="secondary">
@@ -807,16 +946,42 @@ export function LotsClient() {
                 {field.required ? " *" : ""}
               </Typography.Text>
               {field.type === "text" ? (
-                <Input
-                  value={String(actionData[field.key] ?? "")}
-                  onChange={(e) => setActionData((prev) => ({ ...prev, [field.key]: e.target.value }))}
-                />
+                field.key === "broker" ? (
+                  <Select
+                    showSearch
+                    optionFilterProp="label"
+                    value={String(actionData[field.key] ?? "") || undefined}
+                    options={selectedAction === "DISPATCH_TO_AUCTION" ? dispatchBrokerSelectOptions : brokerSelectOptions}
+                    onChange={(value) => setActionData((prev) => applyDispatchMappings(prev, field.key, String(value)))}
+                    {...modalSelectProps}
+                  />
+                ) : field.key === "warehouse" ? (
+                  <Select
+                    value={String(actionData[field.key] ?? "") || undefined}
+                    options={warehouseSelectOptions}
+                    onChange={(value) => setActionData((prev) => applyDispatchMappings(prev, field.key, String(value)))}
+                    {...modalSelectProps}
+                  />
+                ) : field.key === "auction_centre" ? (
+                  <Select
+                    value={String(actionData[field.key] ?? "") || undefined}
+                    options={auctionCentreSelectOptions}
+                    onChange={(value) => setActionData((prev) => ({ ...prev, [field.key]: String(value) }))}
+                    {...modalSelectProps}
+                  />
+                ) : (
+                  <Input
+                    value={String(actionData[field.key] ?? "")}
+                    onChange={(e) => setActionData((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                  />
+                )
               ) : null}
               {field.type === "date" ? (
                 <Input
                   type="date"
                   value={String(actionData[field.key] ?? "")}
                   onChange={(e) => setActionData((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                  onClick={(e) => tryOpenDatePicker(e.currentTarget)}
                 />
               ) : null}
               {field.type === "number" ? (
@@ -827,11 +992,33 @@ export function LotsClient() {
                 />
               ) : null}
               {field.type === "tags" ? (
-                <Select
-                  mode="tags"
-                  value={Array.isArray(actionData[field.key]) ? (actionData[field.key] as string[]) : []}
-                  onChange={(v) => setActionData((prev) => ({ ...prev, [field.key]: v }))}
-                />
+                field.key === "parties" ? (
+                  <Space direction="vertical" style={{ width: "100%" }} size={8}>
+                    <Input
+                      placeholder="Search buyer/broker"
+                      value={partySearch}
+                      onChange={(e) => setPartySearch(e.target.value)}
+                    />
+                    <div style={{ maxHeight: 280, overflowY: "auto", border: "1px solid #f0f0f0", borderRadius: 8, padding: 8 }}>
+                      <Checkbox.Group
+                        style={{ width: "100%" }}
+                        value={Array.isArray(actionData[field.key]) ? (actionData[field.key] as string[]) : []}
+                        options={filteredSamplingPartyOptions}
+                        onChange={(vals) =>
+                          setActionData((prev) => ({ ...prev, [field.key]: vals.map((v) => String(v)) }))
+                        }
+                      />
+                    </div>
+                  </Space>
+                ) : (
+                  <Select
+                    mode="tags"
+                    value={Array.isArray(actionData[field.key]) ? (actionData[field.key] as string[]) : []}
+                    onChange={(v) => setActionData((prev) => ({ ...prev, [field.key]: v }))}
+                    showSearch
+                    {...modalSelectProps}
+                  />
+                )
               ) : null}
             </div>
           ))}
@@ -839,7 +1026,7 @@ export function LotsClient() {
       </Modal>
 
       <Modal
-        title={`Bulk Take Action (${selected.length} lots)`}
+        title={`Bulk Manage Lot (${selected.length} lots)`}
         open={bulkActionModalOpen}
         onCancel={() => setBulkActionModalOpen(false)}
         onOk={async () => {
@@ -866,9 +1053,10 @@ export function LotsClient() {
             value={bulkSelectedAction}
             onChange={(v) => {
               setBulkSelectedAction(v);
-              setBulkActionData({});
+              setBulkActionData(buildInitialActionData(v));
             }}
             options={bulkActionOptions}
+            {...modalSelectProps}
           />
           {actionFieldConfig[bulkSelectedAction].map((field) => (
             <div key={field.key}>
@@ -877,16 +1065,42 @@ export function LotsClient() {
                 {field.required ? " *" : ""}
               </Typography.Text>
               {field.type === "text" ? (
-                <Input
-                  value={String(bulkActionData[field.key] ?? "")}
-                  onChange={(e) => setBulkActionData((prev) => ({ ...prev, [field.key]: e.target.value }))}
-                />
+                field.key === "broker" ? (
+                  <Select
+                    showSearch
+                    optionFilterProp="label"
+                    value={String(bulkActionData[field.key] ?? "") || undefined}
+                    options={bulkSelectedAction === "DISPATCH_TO_AUCTION" ? dispatchBrokerSelectOptions : brokerSelectOptions}
+                    onChange={(value) => setBulkActionData((prev) => applyDispatchMappings(prev, field.key, String(value)))}
+                    {...modalSelectProps}
+                  />
+                ) : field.key === "warehouse" ? (
+                  <Select
+                    value={String(bulkActionData[field.key] ?? "") || undefined}
+                    options={warehouseSelectOptions}
+                    onChange={(value) => setBulkActionData((prev) => applyDispatchMappings(prev, field.key, String(value)))}
+                    {...modalSelectProps}
+                  />
+                ) : field.key === "auction_centre" ? (
+                  <Select
+                    value={String(bulkActionData[field.key] ?? "") || undefined}
+                    options={auctionCentreSelectOptions}
+                    onChange={(value) => setBulkActionData((prev) => ({ ...prev, [field.key]: String(value) }))}
+                    {...modalSelectProps}
+                  />
+                ) : (
+                  <Input
+                    value={String(bulkActionData[field.key] ?? "")}
+                    onChange={(e) => setBulkActionData((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                  />
+                )
               ) : null}
               {field.type === "date" ? (
                 <Input
                   type="date"
                   value={String(bulkActionData[field.key] ?? "")}
                   onChange={(e) => setBulkActionData((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                  onClick={(e) => tryOpenDatePicker(e.currentTarget)}
                 />
               ) : null}
               {field.type === "number" ? (
@@ -897,11 +1111,33 @@ export function LotsClient() {
                 />
               ) : null}
               {field.type === "tags" ? (
-                <Select
-                  mode="tags"
-                  value={Array.isArray(bulkActionData[field.key]) ? (bulkActionData[field.key] as string[]) : []}
-                  onChange={(v) => setBulkActionData((prev) => ({ ...prev, [field.key]: v }))}
-                />
+                field.key === "parties" ? (
+                  <Space direction="vertical" style={{ width: "100%" }} size={8}>
+                    <Input
+                      placeholder="Search buyer/broker"
+                      value={bulkPartySearch}
+                      onChange={(e) => setBulkPartySearch(e.target.value)}
+                    />
+                    <div style={{ maxHeight: 280, overflowY: "auto", border: "1px solid #f0f0f0", borderRadius: 8, padding: 8 }}>
+                      <Checkbox.Group
+                        style={{ width: "100%" }}
+                        value={Array.isArray(bulkActionData[field.key]) ? (bulkActionData[field.key] as string[]) : []}
+                        options={filteredBulkSamplingPartyOptions}
+                        onChange={(vals) =>
+                          setBulkActionData((prev) => ({ ...prev, [field.key]: vals.map((v) => String(v)) }))
+                        }
+                      />
+                    </div>
+                  </Space>
+                ) : (
+                  <Select
+                    mode="tags"
+                    value={Array.isArray(bulkActionData[field.key]) ? (bulkActionData[field.key] as string[]) : []}
+                    onChange={(v) => setBulkActionData((prev) => ({ ...prev, [field.key]: v }))}
+                    showSearch
+                    {...modalSelectProps}
+                  />
+                )
               ) : null}
             </div>
           ))}
