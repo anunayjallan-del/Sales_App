@@ -299,6 +299,11 @@ export function parseActionPayload(action: LotActionName, payload: unknown) {
   return actionRules[action].schema.safeParse(payload ?? {});
 }
 
+export function isLifecycleAction(action: string): boolean {
+  if (!actionNames.includes(action as LotActionName)) return false;
+  return !actionRules[action as LotActionName].eventOnly;
+}
+
 export function isActionAllowedFrom(action: LotActionName, currentStatus: GlobalLotStatus): boolean {
   if (currentStatus === "CLOSED") return false;
   return actionRules[action].allowedFrom.includes(currentStatus);

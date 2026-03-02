@@ -6,7 +6,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AppShell } from "@/components/app-shell";
 import { fetchJson } from "@/lib/fetcher";
 import { FilterOutlined } from "@ant-design/icons";
-import { App, Button, Card, Dropdown, Input, Modal, Popover, Segmented, Select, Space, Table, Tag, Typography } from "antd";
+import { App, Button, Card, Dropdown, Input, Modal, Popconfirm, Popover, Segmented, Select, Space, Table, Tag, Typography } from "antd";
 
 type SamplingRow = {
   id: string;
@@ -231,6 +231,22 @@ export default function SamplingPage() {
     },
     onError: (error: Error) => {
       message.error(error.message || "Failed to record sampling");
+    }
+  });
+  const deleteSamplingAction = useMutation({
+    mutationFn: async (input: { lotId: string; actionId: string }) =>
+      fetchJson<{ deleted: boolean; rolledBackToStatus?: string }>(`/api/lots/${input.lotId}/actions/${input.actionId}`, {
+        method: "DELETE"
+      }),
+    onSuccess: async () => {
+      message.success("Sampling action deleted");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["sampling-records"] }),
+        queryClient.invalidateQueries({ queryKey: ["lots"] })
+      ]);
+    },
+    onError: (error: Error) => {
+      message.error(error.message || "Failed to delete action");
     }
   });
 
@@ -663,6 +679,27 @@ export default function SamplingPage() {
       key: "recorded_at",
       render: (_, row) => new Date(row.performed_at).toLocaleString(),
       responsive: ["md"]
+    },
+    {
+      title: "Action",
+      key: "action_delete",
+      width: 130,
+      render: (_, row) => (
+        <Popconfirm
+          title="Delete this action only?"
+          description="Lot will remain. Only latest action can be deleted."
+          okText="Delete Action"
+          okButtonProps={{ danger: true, loading: deleteSamplingAction.isPending }}
+          cancelText="Cancel"
+          onConfirm={async () => {
+            await deleteSamplingAction.mutateAsync({ lotId: row.lot_id, actionId: row.id });
+          }}
+        >
+          <Button size="small" danger>
+            Delete Action
+          </Button>
+        </Popconfirm>
+      )
     }
   ];
 

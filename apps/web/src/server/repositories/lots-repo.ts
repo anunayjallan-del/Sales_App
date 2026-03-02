@@ -479,9 +479,57 @@ export async function listLotActions(lotId: string) {
     .from("lot_actions")
     .select("*")
     .eq("lot_id", lotId)
-    .order("performed_at", { ascending: false });
+    .order("performed_at", { ascending: false })
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false });
   if (error) throw error;
   return data ?? [];
+}
+
+export async function getLotActionById(lotId: string, actionId: string) {
+  const { data, error } = await db()
+    .from("lot_actions")
+    .select("*")
+    .eq("lot_id", lotId)
+    .eq("id", actionId)
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+export async function getLatestLotAction(lotId: string) {
+  const { data, error } = await db()
+    .from("lot_actions")
+    .select("*")
+    .eq("lot_id", lotId)
+    .order("performed_at", { ascending: false })
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+export async function deleteLotActionById(lotId: string, actionId: string) {
+  const { error } = await db().from("lot_actions").delete().eq("lot_id", lotId).eq("id", actionId);
+  if (error) throw error;
+}
+
+export async function getLatestLifecycleAction(lotId: string, lifecycleActions: string[]) {
+  if (!lifecycleActions.length) return null;
+  const { data, error } = await db()
+    .from("lot_actions")
+    .select("*")
+    .eq("lot_id", lotId)
+    .in("action", lifecycleActions)
+    .order("performed_at", { ascending: false })
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return data;
 }
 
 export async function getLatestDispatchToAuctionAction(lotId: string) {
@@ -491,6 +539,8 @@ export async function getLatestDispatchToAuctionAction(lotId: string) {
     .eq("lot_id", lotId)
     .eq("action", "DISPATCH_TO_AUCTION")
     .order("performed_at", { ascending: false })
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false })
     .limit(1)
     .maybeSingle();
   if (error) throw error;
