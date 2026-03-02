@@ -6,7 +6,7 @@ import { useMemo, useState } from "react";
 import type { ColumnsType } from "antd/es/table";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckOutlined, FilterOutlined } from "@ant-design/icons";
-import { App, Button, Card, Checkbox, Col, Divider, Dropdown, Input, InputNumber, List, Modal, Popover, Row, Select, Space, Table, Tag, Tooltip, Typography } from "antd";
+import { App, Button, Card, Checkbox, Col, Divider, Drawer, Dropdown, Input, InputNumber, List, Modal, Popover, Row, Select, Space, Table, Tag, Tooltip, Typography } from "antd";
 import { fetchJson } from "@/lib/fetcher";
 
 type LotRow = {
@@ -451,6 +451,7 @@ export function LotsClient() {
   const rows = data?.lots ?? [];
   const totalLots = data?.total ?? 0;
   const selectedLotId = selected.length === 1 ? selected[0] : null;
+  const selectedLotRow = rows.find((row) => row.id === selectedLotId) ?? null;
   const samplingHistoryLot = rows.find((row) => row.id === samplingHistoryLotId) ?? null;
   const samplingHistoryRows = useMemo(() => {
     const rows = samplingHistoryData?.rows ?? [];
@@ -999,139 +1000,209 @@ export function LotsClient() {
         </div>
       ) : null}
 
-      <Modal
-        title="Manage Lot"
-        open={actionSelectModalOpen}
-        onCancel={() => setActionSelectModalOpen(false)}
-        onOk={() => {
+      <Drawer
+        title={actionDetailsModalOpen ? "Manage Lot • Step 2 of 2" : "Manage Lot • Step 1 of 2"}
+        open={actionSelectModalOpen || actionDetailsModalOpen}
+        width={620}
+        onClose={() => {
           setActionSelectModalOpen(false);
-          setActionDetailsModalOpen(true);
+          setActionDetailsModalOpen(false);
         }}
+        placement="right"
+        footer={
+          actionDetailsModalOpen ? (
+            <Space style={{ width: "100%", justifyContent: "space-between" }}>
+              <Button
+                key="back"
+                onClick={() => {
+                  setActionDetailsModalOpen(false);
+                  setActionSelectModalOpen(true);
+                }}
+              >
+                Back
+              </Button>
+              <Button
+                key="execute"
+                type="primary"
+                loading={runAction.isPending}
+                onClick={async () => {
+                  if (!selectedLotId) return;
+                  const required = actionFieldConfig[selectedAction].filter((f) => f.required);
+                  const missing = required.find((f) => {
+                    const v = actionData[f.key];
+                    if (Array.isArray(v)) return v.length === 0;
+                    return v === undefined || v === null || String(v).trim() === "";
+                  });
+                  if (missing) {
+                    message.error(`${missing.label} is required`);
+                    return;
+                  }
+                  await runAction.mutateAsync({
+                    lotId: selectedLotId,
+                    action: selectedAction,
+                    data: actionData
+                  });
+                }}
+              >
+                Save Action
+              </Button>
+            </Space>
+          ) : (
+            <Space style={{ width: "100%", justifyContent: "flex-end" }}>
+              <Button
+                key="cancel"
+                onClick={() => {
+                  setActionSelectModalOpen(false);
+                  setActionDetailsModalOpen(false);
+                }}
+              >
+                Cancel
+              </Button>
+            </Space>
+          )
+        }
       >
-        <Space direction="vertical" style={{ width: "100%" }}>
-          <Typography.Text type="secondary">Select the action</Typography.Text>
-          <Select
-            value={selectedAction}
-            onChange={(v) => {
-              setSelectedAction(v);
-              setActionData(buildInitialActionData(v));
-            }}
-            options={actionOptions}
-            {...modalSelectProps}
-          />
-        </Space>
-      </Modal>
+        {!actionDetailsModalOpen ? (
+          <Space direction="vertical" style={{ width: "100%" }} size={12}>
+            <Card size="small" style={{ background: "#fafafa" }}>
+              <Space direction="vertical" size={2} style={{ width: "100%" }}>
+                <Typography.Text type="secondary">Selected Lot</Typography.Text>
+                <Typography.Text strong>
+                  {selectedLotRow ? `${selectedLotRow.mark} / ${selectedLotRow.invoice_number}` : "No lot selected"}
+                </Typography.Text>
+                <Space size={[6, 6]} wrap>
+                  {(selectedLotRow?.active_statuses?.length ? selectedLotRow.active_statuses : [selectedLotRow?.lifecycle_status ?? "PENDING"]).map((s) => (
+                    <Tag key={`manage-select-${s}`} color={s === "CANCELLED" ? "red" : s === "CLOSED" ? "blue" : "green"}>
+                      {formatStatusLabel(s)}
+                    </Tag>
+                  ))}
+                </Space>
+              </Space>
+            </Card>
 
-      <Modal
-        title={`Manage Lot - ${selectedAction.replaceAll("_", " ")}`}
-        open={actionDetailsModalOpen}
-        onCancel={() => setActionDetailsModalOpen(false)}
-        onOk={async () => {
-          if (!selectedLotId) return;
-          const required = actionFieldConfig[selectedAction].filter((f) => f.required);
-          const missing = required.find((f) => {
-            const v = actionData[f.key];
-            if (Array.isArray(v)) return v.length === 0;
-            return v === undefined || v === null || String(v).trim() === "";
-          });
-          if (missing) {
-            message.error(`${missing.label} is required`);
-            return;
-          }
-          await runAction.mutateAsync({
-            lotId: selectedLotId,
-            action: selectedAction,
-            data: actionData
-          });
-        }}
-        okButtonProps={{ loading: runAction.isPending }}
-      >
-        <Space direction="vertical" style={{ width: "100%" }}>
-          {actionFieldConfig[selectedAction].map((field) => (
-            <div key={field.key}>
-              <Typography.Text type="secondary">
-                {field.label}
-                {field.required ? " *" : ""}
+            <Space direction="vertical" style={{ width: "100%" }} size={6}>
+              <Typography.Text type="secondary">Choose an action</Typography.Text>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                Action changes are validated by allowed lifecycle rules.
               </Typography.Text>
-              {field.type === "text" ? (
-                field.key === "broker" ? (
-                  <Select
-                    showSearch
-                    optionFilterProp="label"
-                    value={String(actionData[field.key] ?? "") || undefined}
-                    options={selectedAction === "DISPATCH_TO_AUCTION" ? dispatchBrokerSelectOptions : brokerSelectOptions}
-                    onChange={(value) => setActionData((prev) => applyDispatchMappings(prev, field.key, String(value)))}
-                    {...modalSelectProps}
-                  />
-                ) : field.key === "warehouse" ? (
-                  <Select
-                    value={String(actionData[field.key] ?? "") || undefined}
-                    options={warehouseSelectOptions}
-                    onChange={(value) => setActionData((prev) => applyDispatchMappings(prev, field.key, String(value)))}
-                    {...modalSelectProps}
-                  />
-                ) : field.key === "auction_centre" ? (
-                  <Select
-                    value={String(actionData[field.key] ?? "") || undefined}
-                    options={auctionCentreSelectOptions}
-                    onChange={(value) => setActionData((prev) => ({ ...prev, [field.key]: String(value) }))}
-                    {...modalSelectProps}
-                  />
-                ) : (
-                  <Input
-                    value={String(actionData[field.key] ?? "")}
-                    onChange={(e) => setActionData((prev) => ({ ...prev, [field.key]: e.target.value }))}
-                  />
-                )
-              ) : null}
-              {field.type === "date" ? (
-                <Input
-                  type="date"
-                  value={String(actionData[field.key] ?? "")}
-                  onChange={(e) => setActionData((prev) => ({ ...prev, [field.key]: e.target.value }))}
-                  onClick={(e) => tryOpenDatePicker(e.currentTarget)}
-                />
-              ) : null}
-              {field.type === "number" ? (
-                <InputNumber
-                  style={{ width: "100%" }}
-                  value={typeof actionData[field.key] === "number" ? (actionData[field.key] as number) : undefined}
-                  onChange={(v) => setActionData((prev) => ({ ...prev, [field.key]: v ?? null }))}
-                />
-              ) : null}
-              {field.type === "tags" ? (
-                field.key === "parties" ? (
-                  <Space direction="vertical" style={{ width: "100%" }} size={8}>
-                    <Input
-                      placeholder="Search buyer/broker"
-                      value={partySearch}
-                      onChange={(e) => setPartySearch(e.target.value)}
-                    />
-                    <div style={{ maxHeight: 280, overflowY: "auto", border: "1px solid #f0f0f0", borderRadius: 8, padding: 8 }}>
-                      <Checkbox.Group
-                        style={{ width: "100%" }}
-                        value={Array.isArray(actionData[field.key]) ? (actionData[field.key] as string[]) : []}
-                        options={filteredSamplingPartyOptions}
-                        onChange={(vals) =>
-                          setActionData((prev) => ({ ...prev, [field.key]: vals.map((v) => String(v)) }))
-                        }
+            </Space>
+            <Select
+              size="large"
+              value={selectedAction}
+              onChange={(v) => {
+                setSelectedAction(v);
+                setActionData(buildInitialActionData(v));
+                setActionSelectModalOpen(false);
+                setActionDetailsModalOpen(true);
+              }}
+              options={actionOptions}
+              {...modalSelectProps}
+            />
+          </Space>
+        ) : (
+          <Space direction="vertical" style={{ width: "100%" }} size={12}>
+            <Card size="small" style={{ background: "#fafafa" }}>
+              <Space direction="vertical" size={2} style={{ width: "100%" }}>
+                <Typography.Text type="secondary">Action</Typography.Text>
+                <Typography.Text strong>{formatActionName(selectedAction)}</Typography.Text>
+                <Typography.Text type="secondary">
+                  Lot: {selectedLotRow ? `${selectedLotRow.mark} / ${selectedLotRow.invoice_number}` : "-"}
+                </Typography.Text>
+              </Space>
+            </Card>
+
+            <Row gutter={[12, 12]}>
+              {actionFieldConfig[selectedAction].map((field) => (
+                <Col key={field.key} xs={24} md={field.type === "tags" || field.key === "remarks" ? 24 : 12}>
+                  <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                    <Typography.Text type="secondary">
+                      {field.label}
+                      {field.required ? " *" : ""}
+                    </Typography.Text>
+                    {field.type === "text" ? (
+                      field.key === "broker" ? (
+                        <Select
+                          showSearch
+                          optionFilterProp="label"
+                          value={String(actionData[field.key] ?? "") || undefined}
+                          options={selectedAction === "DISPATCH_TO_AUCTION" ? dispatchBrokerSelectOptions : brokerSelectOptions}
+                          onChange={(value) => setActionData((prev) => applyDispatchMappings(prev, field.key, String(value)))}
+                          {...modalSelectProps}
+                        />
+                      ) : field.key === "warehouse" ? (
+                        <Select
+                          value={String(actionData[field.key] ?? "") || undefined}
+                          options={warehouseSelectOptions}
+                          onChange={(value) => setActionData((prev) => applyDispatchMappings(prev, field.key, String(value)))}
+                          {...modalSelectProps}
+                        />
+                      ) : field.key === "auction_centre" ? (
+                        <Select
+                          value={String(actionData[field.key] ?? "") || undefined}
+                          options={auctionCentreSelectOptions}
+                          onChange={(value) => setActionData((prev) => ({ ...prev, [field.key]: String(value) }))}
+                          {...modalSelectProps}
+                        />
+                      ) : (
+                        <Input
+                          value={String(actionData[field.key] ?? "")}
+                          onChange={(e) => setActionData((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                        />
+                      )
+                    ) : null}
+                    {field.type === "date" ? (
+                      <Input
+                        type="date"
+                        value={String(actionData[field.key] ?? "")}
+                        onChange={(e) => setActionData((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                        onClick={(e) => tryOpenDatePicker(e.currentTarget)}
                       />
-                    </div>
+                    ) : null}
+                    {field.type === "number" ? (
+                      <InputNumber
+                        style={{ width: "100%" }}
+                        value={typeof actionData[field.key] === "number" ? (actionData[field.key] as number) : undefined}
+                        onChange={(v) => setActionData((prev) => ({ ...prev, [field.key]: v ?? null }))}
+                      />
+                    ) : null}
+                    {field.type === "tags" ? (
+                      field.key === "parties" ? (
+                        <Space direction="vertical" style={{ width: "100%" }} size={8}>
+                          <Input
+                            placeholder="Search buyer/broker"
+                            value={partySearch}
+                            onChange={(e) => setPartySearch(e.target.value)}
+                          />
+                          <div
+                            style={{ maxHeight: 280, overflowY: "auto", border: "1px solid #f0f0f0", borderRadius: 8, padding: 8 }}
+                          >
+                            <Checkbox.Group
+                              style={{ width: "100%" }}
+                              value={Array.isArray(actionData[field.key]) ? (actionData[field.key] as string[]) : []}
+                              options={filteredSamplingPartyOptions}
+                              onChange={(vals) =>
+                                setActionData((prev) => ({ ...prev, [field.key]: vals.map((v) => String(v)) }))
+                              }
+                            />
+                          </div>
+                        </Space>
+                      ) : (
+                        <Select
+                          mode="tags"
+                          value={Array.isArray(actionData[field.key]) ? (actionData[field.key] as string[]) : []}
+                          onChange={(v) => setActionData((prev) => ({ ...prev, [field.key]: v }))}
+                          showSearch
+                          {...modalSelectProps}
+                        />
+                      )
+                    ) : null}
                   </Space>
-                ) : (
-                  <Select
-                    mode="tags"
-                    value={Array.isArray(actionData[field.key]) ? (actionData[field.key] as string[]) : []}
-                    onChange={(v) => setActionData((prev) => ({ ...prev, [field.key]: v }))}
-                    showSearch
-                    {...modalSelectProps}
-                  />
-                )
-              ) : null}
-            </div>
-          ))}
-        </Space>
-      </Modal>
+                </Col>
+              ))}
+            </Row>
+          </Space>
+        )}
+      </Drawer>
 
       <Modal
         title={`Bulk Manage Lot (${selected.length} lots)`}
