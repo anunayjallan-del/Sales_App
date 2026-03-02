@@ -21,6 +21,9 @@ type LotDetail = {
   warnings?: string[];
   status_events?: Array<{ id: string; status: string; source: string; effective_at: string; meta?: Record<string, unknown> | null }>;
   actions?: Array<{ id: string; action: string; resulting_status: string; performed_at: string }>;
+  is_sampled?: boolean;
+  last_sampled_on?: string | null;
+  recent_sampling_parties?: string[];
   master_status?: string;
   auction_tracks?: { auction_status?: string }[];
   private_deals?: Array<{ id: string; status: string; final_sale_price_inr: number | null; due_date: string | null }>;
@@ -70,6 +73,11 @@ export default function LotDetailPage() {
                         </Tag>
                       ))}
                     </Space>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Sampled">{lot.is_sampled ? "Yes" : "No"}</Descriptions.Item>
+                  <Descriptions.Item label="Last Sampled On">{lot.last_sampled_on ?? "-"}</Descriptions.Item>
+                  <Descriptions.Item label="Recent Sampling Parties">
+                    {lot.recent_sampling_parties?.length ? lot.recent_sampling_parties.join(", ") : "-"}
                   </Descriptions.Item>
                 </Descriptions>
               </Card>

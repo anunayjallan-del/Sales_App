@@ -109,23 +109,28 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         .eq("id", id);
     }
 
-    await replaceLotActiveStatuses(id, [nextStatus]);
-    await addLotStatusEvent({
-      lotId: id,
-      status: nextStatus,
-      source: "MANUAL",
-      meta: { action: parsed.data.action, ...actionPayload.data }
-    });
-    const warnings = deriveWarnings([nextStatus]);
+    const isLifecycleTransition = !rule.eventOnly && Boolean(nextStatus);
+    if (isLifecycleTransition && nextStatus) {
+      await replaceLotActiveStatuses(id, [nextStatus]);
+      await addLotStatusEvent({
+        lotId: id,
+        status: nextStatus,
+        source: "MANUAL",
+        meta: { action: parsed.data.action, ...actionPayload.data }
+      });
+    }
+    const resultingStatusForAudit = isLifecycleTransition && nextStatus ? nextStatus : currentStatus;
+    const resultingStatuses = isLifecycleTransition && nextStatus ? [nextStatus] : activeStatuses;
+    const warnings = deriveWarnings(resultingStatuses);
     const actionRow = await createLotAction({
       lotId: id,
       action: parsed.data.action,
-      resultingStatus: nextStatus,
+      resultingStatus: resultingStatusForAudit,
       payload: actionPayload.data,
       warningFlags: warnings
     });
 
-    return ok({ action: actionRow, activeStatuses: [nextStatus], warnings }, 201);
+    return ok({ action: actionRow, activeStatuses: resultingStatuses, warnings }, 201);
   } catch (error) {
     return serverError(error);
   }

@@ -6,7 +6,7 @@ import { useMemo, useState } from "react";
 import type { ColumnsType } from "antd/es/table";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckOutlined, FilterOutlined } from "@ant-design/icons";
-import { App, Button, Card, Checkbox, Col, Dropdown, Input, InputNumber, Modal, Popover, Row, Select, Space, Table, Tag, Typography } from "antd";
+import { App, Button, Card, Checkbox, Col, Divider, Dropdown, Input, InputNumber, List, Modal, Popover, Row, Select, Space, Table, Tag, Tooltip, Typography } from "antd";
 import { fetchJson } from "@/lib/fetcher";
 
 type LotRow = {
@@ -25,6 +25,16 @@ type LotRow = {
   auction_status_badge?: string | null;
   private_status_badge?: string | null;
   master_status?: string;
+  is_sampled?: boolean;
+  last_sampled_on?: string | null;
+  recent_sampling_parties?: string[];
+};
+
+type LotActionRow = {
+  id: string;
+  action: string;
+  payload?: Record<string, unknown> | null;
+  performed_at: string;
 };
 
 type ActionName =
@@ -314,6 +324,7 @@ export function LotsClient() {
   const [packingDateFrom, setPackingDateFrom] = useState("");
   const [packingDateTo, setPackingDateTo] = useState("");
   const [statusFilter, setStatusFilter] = useState<string[]>([]);
+  const [sampledFilter, setSampledFilter] = useState<"ALL" | "YES" | "NO">("ALL");
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<string[]>([]);
   const [actionSelectModalOpen, setActionSelectModalOpen] = useState(false);
@@ -325,6 +336,7 @@ export function LotsClient() {
   const [bulkSelectedAction, setBulkSelectedAction] = useState<ActionName>("SAMPLING");
   const [bulkActionData, setBulkActionData] = useState<Record<string, unknown>>({});
   const [bulkPartySearch, setBulkPartySearch] = useState("");
+  const [samplingHistoryLotId, setSamplingHistoryLotId] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const router = useRouter();
   const { message, modal } = App.useApp();
@@ -355,6 +367,8 @@ export function LotsClient() {
     if (packingDateFrom) params.set("packingDateFrom", packingDateFrom);
     if (packingDateTo) params.set("packingDateTo", packingDateTo);
     if (statusFilter.length) params.set("status", statusFilter.join(","));
+    if (sampledFilter === "YES") params.set("sampled", "true");
+    if (sampledFilter === "NO") params.set("sampled", "false");
     return params.toString();
   }, [
     bagsMax,
@@ -368,6 +382,7 @@ export function LotsClient() {
     pageSize,
     search,
     statusFilter,
+    sampledFilter,
     weightMax,
     weightMin
   ]);
@@ -378,6 +393,11 @@ export function LotsClient() {
       fetchJson<{ lots: LotRow[]; total: number; page: number; pageSize: number }>(
         `/api/lots?${lotsQuery}`
       )
+  });
+  const { data: samplingHistoryData, isLoading: samplingHistoryLoading } = useQuery({
+    queryKey: ["lot-actions", samplingHistoryLotId],
+    queryFn: () => fetchJson<{ rows: LotActionRow[] }>(`/api/lots/${samplingHistoryLotId}/actions`),
+    enabled: Boolean(samplingHistoryLotId)
   });
 
   const invalidate = async () => {
@@ -431,6 +451,40 @@ export function LotsClient() {
   const rows = data?.lots ?? [];
   const totalLots = data?.total ?? 0;
   const selectedLotId = selected.length === 1 ? selected[0] : null;
+  const samplingHistoryLot = rows.find((row) => row.id === samplingHistoryLotId) ?? null;
+  const samplingHistoryRows = useMemo(() => {
+    const rows = samplingHistoryData?.rows ?? [];
+    const byDate = new Map<string, Set<string>>();
+    for (const row of rows) {
+      if (row.action !== "SAMPLING") continue;
+      const payload = row.payload ?? {};
+      const samplingDateRaw = String((payload as Record<string, unknown>).sampling_date ?? "").trim();
+      const performedDate = String(row.performed_at ?? "").slice(0, 10);
+      const date = samplingDateRaw || performedDate || "-";
+      const partiesRaw = (payload as Record<string, unknown>).parties;
+      const parties = Array.isArray(partiesRaw)
+        ? partiesRaw.map((party) => String(party ?? "").trim()).filter(Boolean)
+        : [];
+      if (!byDate.has(date)) byDate.set(date, new Set<string>());
+      const dateParties = byDate.get(date)!;
+      if (!parties.length) {
+        dateParties.add("-");
+      } else {
+        for (const party of parties) dateParties.add(party);
+      }
+    }
+    return Array.from(byDate.entries())
+      .map(([date, parties]) => ({ date, parties: Array.from(parties).sort((a, b) => a.localeCompare(b)) }))
+      .sort((a, b) => b.date.localeCompare(a.date));
+  }, [samplingHistoryData?.rows]);
+  const sampledPartyCount = useMemo(
+    () =>
+      new Set(
+        samplingHistoryRows.flatMap((entry) => entry.parties).filter((party) => party && party !== "-")
+      ).size,
+    [samplingHistoryRows]
+  );
+  const sampledDateCount = samplingHistoryRows.length;
 
   const gradeItems = useMemo(
     () => [
@@ -455,7 +509,6 @@ export function LotsClient() {
       { key: "HOLD", label: "HOLD" },
       { key: "REPRINT", label: "REPRINT" },
       { key: "WITHDRAW", label: "WITHDRAW" },
-      { key: "SAMPLING_SENT", label: "SAMPLED" },
       { key: "NEGOTIATING", label: "NEGOTIATING" },
       { key: "SOLD_PENDING_DISPATCH", label: "SOLD_PENDING_DISPATCH" },
       { key: "SOLD", label: "SOLD" },
@@ -691,6 +744,21 @@ export function LotsClient() {
                   {w}
                 </Tag>
               ))}
+              {row.is_sampled && !statuses.includes("SAMPLING_SENT") ? (
+                <Tooltip title={row.last_sampled_on ? `Last sampled on ${row.last_sampled_on}` : "Sampled"}>
+                  <Tag
+                    color="cyan"
+                    style={{ cursor: "pointer" }}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setSamplingHistoryLotId(row.id);
+                    }}
+                  >
+                    SAMPLED
+                  </Tag>
+                </Tooltip>
+              ) : null}
             </Space>
           );
         }
@@ -746,7 +814,7 @@ export function LotsClient() {
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       <Card title="Filters" variant="borderless">
         <Row gutter={[12, 12]}>
-          <Col xs={24} md={6}>
+          <Col xs={24} md={5}>
             <Space direction="vertical" size={4}>
               <Typography.Text type="secondary">Lot Number</Typography.Text>
               <Input
@@ -763,7 +831,7 @@ export function LotsClient() {
               />
             </Space>
           </Col>
-          <Col xs={24} md={10}>
+          <Col xs={24} md={9}>
             <Space direction="vertical" size={6} style={{ width: "100%" }}>
               <Typography.Text type="secondary">Mark</Typography.Text>
               <Space wrap size={[8, 8]}>
@@ -796,7 +864,7 @@ export function LotsClient() {
               </Space>
             </Space>
           </Col>
-          <Col xs={24} md={8}>
+          <Col xs={24} md={6}>
             <Space direction="vertical" size={6} style={{ width: "100%" }}>
               <Typography.Text type="secondary">Factory</Typography.Text>
               <Space wrap size={[8, 8]}>
@@ -826,6 +894,46 @@ export function LotsClient() {
                     {factory}
                   </Button>
                 ))}
+              </Space>
+            </Space>
+          </Col>
+          <Col xs={24} md={4}>
+            <Space direction="vertical" size={6} style={{ width: "100%" }}>
+              <Typography.Text type="secondary">Sampled</Typography.Text>
+              <Space wrap size={[8, 8]}>
+                <Button
+                  size="small"
+                  shape="round"
+                  type={sampledFilter === "ALL" ? "primary" : "default"}
+                  onClick={() => {
+                    setSampledFilter("ALL");
+                    setPage(1);
+                  }}
+                >
+                  All
+                </Button>
+                <Button
+                  size="small"
+                  shape="round"
+                  type={sampledFilter === "YES" ? "primary" : "default"}
+                  onClick={() => {
+                    setSampledFilter("YES");
+                    setPage(1);
+                  }}
+                >
+                  Yes
+                </Button>
+                <Button
+                  size="small"
+                  shape="round"
+                  type={sampledFilter === "NO" ? "primary" : "default"}
+                  onClick={() => {
+                    setSampledFilter("NO");
+                    setPage(1);
+                  }}
+                >
+                  No
+                </Button>
               </Space>
             </Space>
           </Col>
@@ -1141,6 +1249,73 @@ export function LotsClient() {
               ) : null}
             </div>
           ))}
+        </Space>
+      </Modal>
+
+      <Modal
+        title="Sampling History"
+        open={Boolean(samplingHistoryLotId)}
+        onCancel={() => setSamplingHistoryLotId(null)}
+        width={760}
+        footer={[
+          <Button key="close" onClick={() => setSamplingHistoryLotId(null)}>
+            Close
+          </Button>
+        ]}
+      >
+        <Space direction="vertical" style={{ width: "100%" }} size={12}>
+          <Card size="small" style={{ background: "#f6ffed", borderColor: "#b7eb8f" }}>
+            <Space direction="vertical" size={4} style={{ width: "100%" }}>
+              <Typography.Text strong>
+                {samplingHistoryLot ? `${samplingHistoryLot.mark} / ${samplingHistoryLot.invoice_number}` : "Selected Lot"}
+              </Typography.Text>
+              <Row gutter={12}>
+                <Col span={12}>
+                  <Typography.Text type="secondary">Number of parties sampled to</Typography.Text>
+                  <div>
+                    <Typography.Title level={4} style={{ margin: 0 }}>
+                      {sampledPartyCount}
+                    </Typography.Title>
+                  </div>
+                </Col>
+                <Col span={12}>
+                  <Typography.Text type="secondary">Sampling dates recorded</Typography.Text>
+                  <div>
+                    <Typography.Title level={4} style={{ margin: 0 }}>
+                      {sampledDateCount}
+                    </Typography.Title>
+                  </div>
+                </Col>
+              </Row>
+            </Space>
+          </Card>
+
+          {samplingHistoryLoading ? (
+            <Typography.Text type="secondary">Loading sampling history...</Typography.Text>
+          ) : samplingHistoryRows.length === 0 ? (
+            <Typography.Text type="secondary">No sampling history found.</Typography.Text>
+          ) : (
+            <Card size="small" styles={{ body: { paddingTop: 8, paddingBottom: 8 } }}>
+              <List
+                dataSource={samplingHistoryRows}
+                renderItem={(entry) => (
+                  <List.Item key={entry.date} style={{ display: "block", paddingTop: 10, paddingBottom: 10 }}>
+                    <Space direction="vertical" style={{ width: "100%" }} size={8}>
+                      <Typography.Text strong>{entry.date}</Typography.Text>
+                      <Space size={[6, 6]} wrap>
+                        {entry.parties.map((party) => (
+                          <Tag key={`${entry.date}-${party}`} color={party === "-" ? "default" : "blue"}>
+                            {party}
+                          </Tag>
+                        ))}
+                      </Space>
+                    </Space>
+                    <Divider style={{ margin: "10px 0 0" }} />
+                  </List.Item>
+                )}
+              />
+            </Card>
+          )}
         </Space>
       </Modal>
 

@@ -9,6 +9,7 @@ export const lotQuerySchema = z.object({
   grade: z.string().optional(),
   masterStatus: z.string().optional(),
   status: z.string().optional(),
+  sampled: z.coerce.boolean().optional(),
   bagsMin: z.coerce.number().optional(),
   bagsMax: z.coerce.number().optional(),
   weightMin: z.coerce.number().optional(),

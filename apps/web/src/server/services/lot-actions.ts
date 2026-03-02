@@ -24,7 +24,8 @@ export const actionNames = [
 export type LotActionName = (typeof actionNames)[number];
 
 type ActionRule = {
-  resultingStatus: GlobalLotStatus;
+  resultingStatus?: GlobalLotStatus;
+  eventOnly?: boolean;
   allowedFrom: GlobalLotStatus[];
   schema: z.ZodTypeAny;
 };
@@ -37,7 +38,7 @@ const guwahatiCentre = "Guwahati";
 
 export const actionRules: Record<LotActionName, ActionRule> = {
   SAMPLING: {
-    resultingStatus: "SAMPLING_SENT",
+    eventOnly: true,
     allowedFrom: ["PENDING", "IN_TRANSIT", "AWR_PENDING", "AWR_RECEIVED", "CATALOGUED", "HOLD", "OUT", "WITHDRAW", "SAMPLING_SENT"],
     schema: z.object({
       parties: z.array(z.string().min(1)).min(1),

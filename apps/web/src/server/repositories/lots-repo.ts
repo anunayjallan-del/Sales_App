@@ -69,7 +69,14 @@ function withFlatStatuses<T extends LotWithRelations>(lot: T, activeStatusesFrom
     hasAuctionPayment: Boolean(lot.auction_tracks?.[0]?.payment_received_date),
     hasPrivatePayment
   });
-  const active_statuses = activeStatusesFromTable?.length ? activeStatusesFromTable : fallback;
+  const persisted = activeStatusesFromTable?.length ? activeStatusesFromTable : fallback;
+  const withoutSamplingSent = persisted.filter((status) => status !== "SAMPLING_SENT");
+  const fallbackWithoutSamplingSent = fallback.filter((status) => status !== "SAMPLING_SENT");
+  const active_statuses: GlobalLotStatus[] = withoutSamplingSent.length
+    ? withoutSamplingSent
+    : fallbackWithoutSamplingSent.length
+      ? fallbackWithoutSamplingSent
+      : ["PENDING"];
   const warnings = deriveWarnings(active_statuses);
 
   return {
@@ -81,6 +88,67 @@ function withFlatStatuses<T extends LotWithRelations>(lot: T, activeStatusesFrom
   };
 }
 
+type SamplingSnapshot = {
+  is_sampled: boolean;
+  last_sampled_on: string | null;
+  recent_sampling_parties: string[];
+};
+
+function normalizeIsoDate(value: unknown): string | null {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  const match = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (match) return match[1] ?? null;
+  return null;
+}
+
+function parseSamplingParties(payload: unknown): string[] {
+  if (!payload || typeof payload !== "object") return [];
+  const parties = (payload as Record<string, unknown>).parties;
+  if (!Array.isArray(parties)) return [];
+  return Array.from(
+    new Set(
+      parties
+        .map((party) => String(party ?? "").trim())
+        .filter(Boolean)
+    )
+  );
+}
+
+async function getSamplingSnapshotByLotIds(lotIds: string[]) {
+  const result = new Map<string, SamplingSnapshot>();
+  if (!lotIds.length) return result;
+
+  const chunkSize = 200;
+  for (let i = 0; i < lotIds.length; i += chunkSize) {
+    const chunk = lotIds.slice(i, i + chunkSize);
+    const { data, error } = await db()
+      .from("lot_actions")
+      .select("lot_id,payload,performed_at")
+      .eq("action", "SAMPLING")
+      .in("lot_id", chunk);
+    if (error) throw error;
+    for (const row of data ?? []) {
+      const lotId = String(row.lot_id);
+      const samplingDate =
+        normalizeIsoDate((row.payload as Record<string, unknown> | null)?.sampling_date) ??
+        normalizeIsoDate(row.performed_at);
+      const existing = result.get(lotId) ?? {
+        is_sampled: true,
+        last_sampled_on: null,
+        recent_sampling_parties: []
+      };
+      if (samplingDate && (!existing.last_sampled_on || samplingDate > existing.last_sampled_on)) {
+        existing.last_sampled_on = samplingDate;
+      }
+      const mergedParties = new Set([...existing.recent_sampling_parties, ...parseSamplingParties(row.payload)]);
+      existing.recent_sampling_parties = Array.from(mergedParties).sort((a, b) => a.localeCompare(b));
+      result.set(lotId, existing);
+    }
+  }
+  return result;
+}
+
 export async function listLots(filters: {
   search?: string;
   mark?: string;
@@ -88,6 +156,7 @@ export async function listLots(filters: {
   grade?: string;
   masterStatus?: string;
   status?: string;
+  sampled?: boolean;
   bagsMin?: number;
   bagsMax?: number;
   weightMin?: number;
@@ -122,6 +191,7 @@ export async function listLots(filters: {
         .map((s) => normalizeStatusFilter(s))
         .filter(Boolean)
     : [];
+  const needsComputedFiltering = statusFilters.length > 0 || filters.sampled !== undefined;
 
   let dataQuery = db()
     .from("lots")
@@ -170,7 +240,7 @@ export async function listLots(filters: {
     dataQuery = dataQuery.lte("date_created", filters.packingDateTo);
     countQuery = countQuery.lte("date_created", filters.packingDateTo);
   }
-  if (!statusFilters.length) {
+  if (!needsComputedFiltering) {
     dataQuery = dataQuery.range(from, to);
     const [{ data, error }, { count, error: countError }] = await Promise.all([dataQuery, countQuery]);
     if (error) throw error;
@@ -180,13 +250,21 @@ export async function listLots(filters: {
       factory: lot.factory ?? deriveFactoryFromMark(lot.mark)
     }));
     const activeByLot = await getActiveStatusesForLots(lotRows.map((l) => l.id));
+    const samplingByLot = await getSamplingSnapshotByLotIds(lotRows.map((l) => String(l.id)));
     const lots = lotRows.map((lot) =>
-      withFlatStatuses(withComputedLifecycle(lot), activeByLot.get(lot.id) ?? null)
+      ({
+        ...withFlatStatuses(withComputedLifecycle(lot), activeByLot.get(lot.id) ?? null),
+        ...(samplingByLot.get(String(lot.id)) ?? {
+          is_sampled: false,
+          last_sampled_on: null,
+          recent_sampling_parties: []
+        })
+      })
     );
     return { lots, total: count ?? 0 };
   }
 
-  // For status filtering, compute using both persisted active statuses and fallback derived statuses
+  // For status/sampled filtering, compute using both persisted active statuses and fallback derived statuses
   // so filtering matches what UI displays.
   const buildStatusBaseQuery = () => {
     let query = db()
@@ -207,13 +285,13 @@ export async function listLots(filters: {
   };
 
   const chunkSize = 1000;
-  const allData: Array<Record<string, unknown>> = [];
+  const allData: LotWithRelations[] = [];
   let start = 0;
   while (true) {
     const { data: chunk, error: chunkError } = await buildStatusBaseQuery().range(start, start + chunkSize - 1);
     if (chunkError) throw chunkError;
     if (!chunk?.length) break;
-    allData.push(...chunk);
+    allData.push(...((chunk ?? []) as LotWithRelations[]));
     if (chunk.length < chunkSize) break;
     start += chunkSize;
   }
@@ -223,20 +301,24 @@ export async function listLots(filters: {
     factory: (lot.factory as string | null) ?? deriveFactoryFromMark(String(lot.mark ?? ""))
   }));
   const activeByLot = await getActiveStatusesForLots(allLotRows.map((l) => l.id));
+  const samplingByLot = await getSamplingSnapshotByLotIds(allLotRows.map((l) => String(l.id)));
   const enriched = allLotRows.map((lot) =>
-    withFlatStatuses(withComputedLifecycle(lot), activeByLot.get(lot.id) ?? null)
+    ({
+      ...withFlatStatuses(withComputedLifecycle(lot), activeByLot.get(lot.id) ?? null),
+      ...(samplingByLot.get(String(lot.id)) ?? {
+        is_sampled: false,
+        last_sampled_on: null,
+        recent_sampling_parties: []
+      })
+    })
   );
   const filtered = enriched.filter((lot) => {
+    if (filters.sampled === true && !lot.is_sampled) return false;
+    if (filters.sampled === false && lot.is_sampled) return false;
+    if (!statusFilters.length) return true;
     const statuses = lot.active_statuses ?? [];
     return statuses.some((s) => statusFilters.includes(s));
   });
-  if (process.env.NODE_ENV !== "production") {
-    console.log("[listLots:status]", {
-      statusFilters,
-      baseLots: allLotRows.length,
-      filteredLots: filtered.length
-    });
-  }
   const paged = filtered.slice(from, to + 1);
   return { lots: paged, total: filtered.length };
 }
@@ -255,8 +337,17 @@ export async function getLotWithRelations(lotId: string) {
   });
   const activeByLot = await getActiveStatusesForLots([lotId]);
   const lotWithFlat = withFlatStatuses(enriched, activeByLot.get(lotId) ?? null);
+  const samplingActions = (data.lot_actions ?? []).filter((action: { action: string }) => action.action === "SAMPLING");
+  const samplingSnapshot = (
+    await getSamplingSnapshotByLotIds([lotId])
+  ).get(lotId) ?? {
+    is_sampled: samplingActions.length > 0,
+    last_sampled_on: null,
+    recent_sampling_parties: []
+  };
   return {
     ...lotWithFlat,
+    ...samplingSnapshot,
     status_events: (data.lot_status_events ?? []).sort((a: { effective_at: string }, b: { effective_at: string }) =>
       b.effective_at.localeCompare(a.effective_at)
     ),
