@@ -277,7 +277,6 @@ export function normalizeCurrentStatus(statuses: GlobalLotStatus[]): GlobalLotSt
     "SOLD",
     "SOLD_PENDING_DISPATCH",
     "NEGOTIATING",
-    "SAMPLING_SENT",
     "PENDING_AUCTION_DISPATCH",
     "WITHDRAW",
     "HOLD",
