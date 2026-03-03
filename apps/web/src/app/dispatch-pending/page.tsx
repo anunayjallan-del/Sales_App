@@ -17,6 +17,7 @@ type PendingLotRow = {
   bags: number;
   net_weight_kg: number;
   date_created: string;
+  active_statuses?: string[];
   is_sampled?: boolean;
   auction_lane_status?: string | null;
   private_lane_status?: string | null;
@@ -151,7 +152,8 @@ const actionFieldConfig: Record<ActionName, ActionField[]> = {
     { key: "remarks", label: "Remarks", type: "text" }
   ],
   NEGOTIATING: [
-    { key: "buyers", label: "Buyers", type: "text", required: true },
+    { key: "broker", label: "Broker", type: "text", required: true },
+    { key: "buyers", label: "Buyers", type: "text" },
     { key: "negotiation_date", label: "Negotiation date", type: "date", required: true }
   ],
   SOLD_PENDING_DISPATCH: [
@@ -220,6 +222,14 @@ function sanitizeAllowedActions(actions: string[] | undefined): ActionName[] {
     .filter((action) => actionNameSet.has(action));
 }
 
+function ensureSamplingForNonTerminalLot(actions: ActionName[], row: PendingLotRow | null): ActionName[] {
+  if (!row) return actions;
+  const statuses = row.active_statuses ?? [];
+  if (statuses.includes("CANCELLED") || statuses.includes("CLOSED")) return actions;
+  if (actions.includes("SAMPLING")) return actions;
+  return ["SAMPLING", ...actions];
+}
+
 function resolveConflictPromptType(auctionStatus: string | null | undefined): ConflictPromptType | null {
   if (!auctionStatus) return null;
   if (auctionStatusesEarlyStage.has(auctionStatus)) return "EARLY_STAGE_GUIDANCE";
@@ -231,7 +241,7 @@ function resolveConflictPromptType(auctionStatus: string | null | undefined): Co
 
 function getConflictPromptMessage(promptType: ConflictPromptType): string {
   if (promptType === "EARLY_STAGE_GUIDANCE") {
-    return "This lot is on the way to auction. Continue only after stopping that move.";
+    return "This lot is on way to the auction. Are you sure you want to continue? If yes, remember to stop AWR generation.";
   }
   if (promptType === "MIDDLE_STAGE_1_GUIDANCE") {
     return "The AWR for this lot is on hold. Are you sure you want to continue? If yes, remember to cancel it's AWR.";
@@ -277,6 +287,7 @@ function formatActionName(action: string): string {
 
 function formatStatusLabel(status: string): string {
   if (status === "PENDING_AUCTION_DISPATCH") return "PENDING AUCTION DISPATCH";
+  if (status === "WITHDRAW") return "WITHDRAWN";
   return status;
 }
 
@@ -342,6 +353,7 @@ export default function DispatchPendingPage() {
   const [actionSelectOpen, setActionSelectOpen] = useState(false);
   const [actionDetailsOpen, setActionDetailsOpen] = useState(false);
   const [selectedAction, setSelectedAction] = useState<ActionName>("SAMPLING");
+  const [actionStep1Choice, setActionStep1Choice] = useState<ActionName | undefined>(undefined);
   const [actionData, setActionData] = useState<Record<string, unknown>>({});
   const [partySearch, setPartySearch] = useState("");
   const [reinvoiceTargetSearch, setReinvoiceTargetSearch] = useState("");
@@ -548,8 +560,8 @@ export default function DispatchPendingPage() {
   const total = data?.total ?? 0;
   const selectedRows = rows.filter((row) => selectedLotIds.includes(row.id));
   const manageLotAllowedActions = useMemo(
-    () => sanitizeAllowedActions(manageLot?.allowed_actions),
-    [manageLot?.allowed_actions]
+    () => ensureSamplingForNonTerminalLot(sanitizeAllowedActions(manageLot?.allowed_actions), manageLot),
+    [manageLot]
   );
 
   const latestPreparedAdvice = useMemo(() => {
@@ -703,27 +715,28 @@ export default function DispatchPendingPage() {
       render: (value: string) => formatPackingDate(value)
     },
     {
-      title: "Lane Status",
-      key: "lane_status",
+      title: "Status",
+      key: "status",
       width: 260,
       render: (_, row) => {
-        const laneChips = getLaneStatusChips(row.auction_lane_status, row.private_lane_status);
+        const statuses = row.active_statuses?.length
+          ? row.active_statuses
+          : getLaneStatusChips(row.auction_lane_status, row.private_lane_status).map((chip) => chip.label);
         const negotiatingTooltip = negotiatingTooltipText(row.negotiating_buyers, row.last_negotiated_on);
         return (
           <Space size={[4, 4]} wrap>
-            {laneChips.map((chip) => {
+            {statuses.map((status) => {
+              const label = formatStatusLabel(status);
               const isNegotiatingChip =
-                chip.color === "purple" &&
-                row.private_lane_status === "NEGOTIATING" &&
-                chip.label === "NEGOTIATING" &&
+                status === "NEGOTIATING" &&
                 Boolean(negotiatingTooltip);
               const tag = (
-                <Tag key={`${row.id}-${chip.color}-${chip.label}`} color={chip.color}>
-                  {chip.label}
+                <Tag key={`${row.id}-${status}`} color={status === "NEGOTIATING" ? "purple" : "geekblue"}>
+                  {label}
                 </Tag>
               );
               return isNegotiatingChip ? (
-                <Tooltip key={`${row.id}-${chip.color}-${chip.label}-tooltip`} title={negotiatingTooltip}>
+                <Tooltip key={`${row.id}-${status}-tooltip`} title={negotiatingTooltip}>
                   {tag}
                 </Tooltip>
               ) : (
@@ -771,8 +784,7 @@ export default function DispatchPendingPage() {
               onClick={() => {
                 if (!firstAction) return;
                 setManageLot(row);
-                setSelectedAction(firstAction);
-                setActionData(buildInitialActionData(firstAction));
+                setActionStep1Choice(undefined);
                 setActionSelectOpen(true);
               }}
             >
@@ -946,6 +958,15 @@ export default function DispatchPendingPage() {
       data: bulkActionData
     });
   };
+  const openPendingManageStep2 = (action: ActionName) => {
+    if (!manageLotAllowedActions.includes(action)) return;
+    setSelectedAction(action);
+    setActionStep1Choice(undefined);
+    setActionData(buildInitialActionData(action));
+    setReinvoiceTargetSearch("");
+    setActionSelectOpen(false);
+    setActionDetailsOpen(true);
+  };
   const toggleSelectedLot = (lotId: string) => {
     setSelectedLotIds((prev) => (prev.includes(lotId) ? prev.filter((id) => id !== lotId) : [...prev, lotId]));
   };
@@ -1106,6 +1127,7 @@ export default function DispatchPendingPage() {
         onClose={() => {
           setActionSelectOpen(false);
           setActionDetailsOpen(false);
+          setActionStep1Choice(undefined);
           setManageLot(null);
           setActionData({});
           setReinvoiceTargetSearch("");
@@ -1118,6 +1140,7 @@ export default function DispatchPendingPage() {
                 onClick={() => {
                   setActionDetailsOpen(false);
                   setActionSelectOpen(true);
+                  setActionStep1Choice(undefined);
                 }}
               >
                 Back
@@ -1135,6 +1158,7 @@ export default function DispatchPendingPage() {
               <Button
                 onClick={() => {
                   setActionSelectOpen(false);
+                  setActionStep1Choice(undefined);
                   setReinvoiceTargetSearch("");
                 }}
               >
@@ -1149,7 +1173,15 @@ export default function DispatchPendingPage() {
             direction="vertical"
             style={{ width: "100%" }}
             size={12}
-            onKeyDown={(event) => void handleEnterToSubmit(event, submitPendingManageLotAction)}
+            onKeyDown={(event) =>
+              void handleEnterToSubmit(event, async () => {
+                if (!actionStep1Choice) {
+                  message.error("Select an action first.");
+                  return;
+                }
+                openPendingManageStep2(actionStep1Choice);
+              })
+            }
           >
             <Card size="small" style={{ background: "#fafafa" }}>
               <Typography.Text type="secondary">Selected Lot</Typography.Text>
@@ -1193,14 +1225,10 @@ export default function DispatchPendingPage() {
             </Space>
             <Select
               size="large"
-              value={selectedAction}
-              onChange={(v) => {
-                setSelectedAction(v);
-                setActionData(buildInitialActionData(v));
-                setReinvoiceTargetSearch("");
-                setActionSelectOpen(false);
-                setActionDetailsOpen(true);
-              }}
+              value={actionStep1Choice}
+              placeholder="Select an action"
+              onChange={(v) => setActionStep1Choice(v)}
+              onSelect={(v) => openPendingManageStep2(v as ActionName)}
               options={actionOptions}
               disabled={!actionOptions.length}
               {...modalSelectProps}
@@ -1234,6 +1262,15 @@ export default function DispatchPendingPage() {
                       value={Array.isArray(actionData[field.key]) ? (actionData[field.key] as string[]) : []}
                       options={buyerSelectOptions}
                       onChange={(value) => setActionData((prev) => ({ ...prev, [field.key]: value.map((item) => String(item)) }))}
+                      {...modalSelectProps}
+                    />
+                  ) : (field.key === "buyer" || field.key === "buyer_name") ? (
+                    <Select
+                      showSearch
+                      optionFilterProp="label"
+                      value={String(actionData[field.key] ?? "") || undefined}
+                      options={buyerSelectOptions}
+                      onChange={(value) => setActionData((prev) => ({ ...prev, [field.key]: String(value) }))}
                       {...modalSelectProps}
                     />
                   ) : field.key === "broker" ? (
@@ -1467,6 +1504,15 @@ export default function DispatchPendingPage() {
                     value={Array.isArray(bulkActionData[field.key]) ? (bulkActionData[field.key] as string[]) : []}
                     options={buyerSelectOptions}
                     onChange={(value) => setBulkActionData((prev) => ({ ...prev, [field.key]: value.map((item) => String(item)) }))}
+                    {...modalSelectProps}
+                  />
+                ) : (field.key === "buyer" || field.key === "buyer_name") ? (
+                  <Select
+                    showSearch
+                    optionFilterProp="label"
+                    value={String(bulkActionData[field.key] ?? "") || undefined}
+                    options={buyerSelectOptions}
+                    onChange={(value) => setBulkActionData((prev) => ({ ...prev, [field.key]: String(value) }))}
                     {...modalSelectProps}
                   />
                 ) : field.key === "broker" ? (

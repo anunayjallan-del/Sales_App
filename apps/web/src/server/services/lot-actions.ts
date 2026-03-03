@@ -147,21 +147,13 @@ function normalizeBuyerList(input: unknown): string[] {
 
 const negotiatingSchema = z
   .object({
+    broker: z.string().min(1),
     buyer: z.string().optional(),
     buyers: z.array(z.string()).optional(),
     negotiation_date: z.string().min(1)
   })
-  .superRefine((value, ctx) => {
-    const normalized = [...normalizeBuyerList(value.buyers), ...normalizeBuyerList(value.buyer)];
-    if (!normalized.length) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["buyers"],
-        message: "At least one buyer is required."
-      });
-    }
-  })
   .transform((value) => ({
+    broker: value.broker.trim(),
     buyers: Array.from(new Set([...normalizeBuyerList(value.buyers), ...normalizeBuyerList(value.buyer)])),
     negotiation_date: value.negotiation_date.trim()
   }));

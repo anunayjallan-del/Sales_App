@@ -152,7 +152,8 @@ const actionFieldConfig: Record<ActionName, ActionField[]> = {
     { key: "remarks", label: "Remarks", type: "text" }
   ],
   NEGOTIATING: [
-    { key: "buyers", label: "Buyers", type: "text", required: true },
+    { key: "broker", label: "Broker", type: "text", required: true },
+    { key: "buyers", label: "Buyers", type: "text" },
     { key: "negotiation_date", label: "Negotiation date", type: "date", required: true }
   ],
   SOLD_PENDING_DISPATCH: [
@@ -221,6 +222,14 @@ function sanitizeAllowedActions(actions: string[] | undefined): ActionName[] {
     .filter((action) => actionNameSet.has(action));
 }
 
+function ensureSamplingForNonTerminalLot(actions: ActionName[], row: LotRow | null): ActionName[] {
+  if (!row) return actions;
+  const statuses = row.active_statuses ?? [];
+  if (statuses.includes("CANCELLED") || statuses.includes("CLOSED")) return actions;
+  if (actions.includes("SAMPLING")) return actions;
+  return ["SAMPLING", ...actions];
+}
+
 function resolveConflictPromptType(auctionStatus: string | null | undefined): ConflictPromptType | null {
   if (!auctionStatus) return null;
   if (auctionStatusesEarlyStage.has(auctionStatus)) return "EARLY_STAGE_GUIDANCE";
@@ -232,7 +241,7 @@ function resolveConflictPromptType(auctionStatus: string | null | undefined): Co
 
 function getConflictPromptMessage(promptType: ConflictPromptType): string {
   if (promptType === "EARLY_STAGE_GUIDANCE") {
-    return "This lot is on the way to auction. Continue only after stopping that move.";
+    return "This lot is on way to the auction. Are you sure you want to continue? If yes, remember to stop AWR generation.";
   }
   if (promptType === "MIDDLE_STAGE_1_GUIDANCE") {
     return "The AWR for this lot is on hold. Are you sure you want to continue? If yes, remember to cancel it's AWR.";
@@ -272,6 +281,7 @@ function formatActionName(action: string): string {
 function formatStatusLabel(status: string): string {
   if (status === "SAMPLING_SENT") return "SAMPLED";
   if (status === "PENDING_AUCTION_DISPATCH") return "PENDING AUCTION DISPATCH";
+  if (status === "WITHDRAW") return "WITHDRAWN";
   return status;
 }
 
@@ -442,6 +452,7 @@ export function LotsClient() {
   const [actionSelectModalOpen, setActionSelectModalOpen] = useState(false);
   const [actionDetailsModalOpen, setActionDetailsModalOpen] = useState(false);
   const [selectedAction, setSelectedAction] = useState<ActionName>("SAMPLING");
+  const [actionStep1Choice, setActionStep1Choice] = useState<ActionName | undefined>(undefined);
   const [actionData, setActionData] = useState<Record<string, unknown>>({});
   const [partySearch, setPartySearch] = useState("");
   const [bulkActionModalOpen, setBulkActionModalOpen] = useState(false);
@@ -717,6 +728,7 @@ export function LotsClient() {
   const openManageLotStep2 = (action: ActionName) => {
     if (!selectedLotAllowedActions.includes(action)) return;
     setSelectedAction(action);
+    setActionStep1Choice(undefined);
     setActionData(buildInitialActionData(action));
     setReinvoiceTargetSearch("");
     setActionSelectModalOpen(false);
@@ -793,7 +805,7 @@ export function LotsClient() {
       { key: "OUT", label: "OUT" },
       { key: "HOLD", label: "HOLD" },
       { key: "REPRINT", label: "REPRINT" },
-      { key: "WITHDRAW", label: "WITHDRAW" },
+      { key: "WITHDRAW", label: "WITHDRAWN" },
       { key: "NEGOTIATING", label: "NEGOTIATING" },
       { key: "SOLD_PENDING_DISPATCH", label: "SOLD_PENDING_DISPATCH" },
       { key: "SOLD", label: "SOLD" },
@@ -813,8 +825,8 @@ export function LotsClient() {
     ];
   }, [statusFilter]);
   const selectedLotAllowedActions = useMemo(
-    () => sanitizeAllowedActions(selectedLotRow?.allowed_actions),
-    [selectedLotRow?.allowed_actions]
+    () => ensureSamplingForNonTerminalLot(sanitizeAllowedActions(selectedLotRow?.allowed_actions), selectedLotRow),
+    [selectedLotRow]
   );
   const actionOptions = useMemo(
     () =>
@@ -1115,8 +1127,7 @@ export function LotsClient() {
                 onClick={() => {
                   if (!firstAction) return;
                   setSelected([row.id]);
-                  setSelectedAction(firstAction);
-                  setActionData(buildInitialActionData(firstAction));
+                  setActionStep1Choice(undefined);
                   setActionSelectModalOpen(true);
                 }}
               >
@@ -1354,6 +1365,7 @@ export function LotsClient() {
         onClose={() => {
           setActionSelectModalOpen(false);
           setActionDetailsModalOpen(false);
+          setActionStep1Choice(undefined);
           setReinvoiceTargetSearch("");
         }}
         placement="right"
@@ -1365,6 +1377,7 @@ export function LotsClient() {
                 onClick={() => {
                   setActionDetailsModalOpen(false);
                   setActionSelectModalOpen(true);
+                  setActionStep1Choice(undefined);
                 }}
               >
                 Back
@@ -1401,7 +1414,11 @@ export function LotsClient() {
             size={12}
             onKeyDown={(event) =>
               void handleEnterToSubmit(event, async () => {
-                openManageLotStep2(selectedAction);
+                if (!actionStep1Choice) {
+                  message.error("Select an action first.");
+                  return;
+                }
+                openManageLotStep2(actionStep1Choice);
               })
             }
           >
@@ -1448,8 +1465,10 @@ export function LotsClient() {
             </Space>
             <Select
               size="large"
-              value={selectedAction}
-              onChange={(v) => openManageLotStep2(v)}
+              value={actionStep1Choice}
+              placeholder="Select an action"
+              onChange={(v) => setActionStep1Choice(v)}
+              onSelect={(v) => openManageLotStep2(v as ActionName)}
               options={actionOptions}
               disabled={!actionOptions.length}
               {...modalSelectProps}
@@ -1535,6 +1554,15 @@ export function LotsClient() {
                           value={Array.isArray(actionData[field.key]) ? (actionData[field.key] as string[]) : []}
                           options={buyerSelectOptions}
                           onChange={(value) => setActionData((prev) => ({ ...prev, [field.key]: value.map((item) => String(item)) }))}
+                          {...modalSelectProps}
+                        />
+                      ) : (field.key === "buyer" || field.key === "buyer_name") ? (
+                        <Select
+                          showSearch
+                          optionFilterProp="label"
+                          value={String(actionData[field.key] ?? "") || undefined}
+                          options={buyerSelectOptions}
+                          onChange={(value) => setActionData((prev) => ({ ...prev, [field.key]: String(value) }))}
                           {...modalSelectProps}
                         />
                       ) : field.key === "broker" ? (
@@ -1678,6 +1706,15 @@ export function LotsClient() {
                     value={Array.isArray(bulkActionData[field.key]) ? (bulkActionData[field.key] as string[]) : []}
                     options={buyerSelectOptions}
                     onChange={(value) => setBulkActionData((prev) => ({ ...prev, [field.key]: value.map((item) => String(item)) }))}
+                    {...modalSelectProps}
+                  />
+                ) : (field.key === "buyer" || field.key === "buyer_name") ? (
+                  <Select
+                    showSearch
+                    optionFilterProp="label"
+                    value={String(bulkActionData[field.key] ?? "") || undefined}
+                    options={buyerSelectOptions}
+                    onChange={(value) => setBulkActionData((prev) => ({ ...prev, [field.key]: String(value) }))}
                     {...modalSelectProps}
                   />
                 ) : field.key === "broker" ? (
