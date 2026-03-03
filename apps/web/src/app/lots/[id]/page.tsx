@@ -2,7 +2,7 @@
 
 import { useParams } from "next/navigation";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { App, Button, Card, Col, Descriptions, Empty, Row, Space, Spin, Tag, Typography } from "antd";
+import { App, Button, Card, Col, Descriptions, Empty, Row, Space, Spin, Tag, Tooltip, Typography } from "antd";
 import { AppShell } from "@/components/app-shell";
 import { fetchJson } from "@/lib/fetcher";
 
@@ -10,6 +10,21 @@ function formatStatusLabel(status: string): string {
   if (status === "SAMPLING_SENT") return "SAMPLED";
   if (status === "PENDING_AUCTION_DISPATCH") return "PENDING AUCTION DISPATCH";
   return status;
+}
+
+function getLaneStatusChips(auctionStatus: string | null | undefined, privateStatus: string | null | undefined): Array<{ color: string; label: string }> {
+  const chips: Array<{ color: string; label: string }> = [];
+  if (auctionStatus) chips.push({ color: "geekblue", label: formatStatusLabel(auctionStatus) });
+  if (privateStatus) chips.push({ color: "purple", label: formatStatusLabel(privateStatus) });
+  if (!chips.length) chips.push({ color: "default", label: "PENDING" });
+  return chips;
+}
+
+function negotiatingTooltipText(buyers: string[] | undefined, negotiatedOn: string | null | undefined): string | null {
+  if (!buyers?.length) return null;
+  const buyersText = buyers.join(", ");
+  if (!negotiatedOn) return `Negotiating with: ${buyersText}`;
+  return `Negotiating with: ${buyersText} (as of ${negotiatedOn})`;
 }
 
 type LotDetail = {
@@ -20,12 +35,17 @@ type LotDetail = {
   is_cancelled?: boolean;
   lifecycle_status?: string;
   active_statuses?: string[];
+  auction_lane_status?: string | null;
+  private_lane_status?: string | null;
   warnings?: string[];
   status_events?: Array<{ id: string; status: string; source: string; effective_at: string; meta?: Record<string, unknown> | null }>;
   actions?: Array<{ id: string; action: string; resulting_status: string; performed_at: string }>;
   is_sampled?: boolean;
   last_sampled_on?: string | null;
   recent_sampling_parties?: string[];
+  negotiating_buyers?: string[];
+  last_negotiated_on?: string | null;
+  reinvoiced_from_lot_id?: string | null;
   master_status?: string;
   auction_tracks?: { auction_status?: string }[];
   private_deals?: Array<{ id: string; status: string; final_sale_price_inr: number | null; due_date: string | null }>;
@@ -62,18 +82,32 @@ export default function LotDetailPage() {
                 <Descriptions column={1} size="small">
                   <Descriptions.Item label="Lot">{lot.mark + " / " + lot.invoice_number}</Descriptions.Item>
                   <Descriptions.Item label="Grade">{lot.grade}</Descriptions.Item>
-                  <Descriptions.Item label="Active Statuses">
+                  <Descriptions.Item label="Status Lanes">
                     <Space wrap>
-                      {(lot.active_statuses ?? [lot.lifecycle_status ?? "PENDING"]).map((s) => (
-                        <Tag key={s} color={s === "CANCELLED" ? "red" : s === "CLOSED" ? "blue" : "green"}>
-                          {formatStatusLabel(s)}
-                        </Tag>
-                      ))}
-                      {(lot.warnings ?? []).map((w) => (
-                        <Tag key={w} color="orange">
-                          {w}
-                        </Tag>
-                      ))}
+                      {getLaneStatusChips(lot.auction_lane_status, lot.private_lane_status).map((chip) => {
+                        const negotiatingTooltip = negotiatingTooltipText(lot.negotiating_buyers, lot.last_negotiated_on);
+                        const isNegotiatingChip =
+                          chip.color === "purple" &&
+                          lot.private_lane_status === "NEGOTIATING" &&
+                          chip.label === "NEGOTIATING" &&
+                          Boolean(negotiatingTooltip);
+                        const tag = (
+                          <Tag key={`lot-detail-${chip.color}-${chip.label}`} color={chip.color}>
+                            {chip.label}
+                          </Tag>
+                        );
+                        return isNegotiatingChip ? (
+                          <Tooltip key={`lot-detail-${chip.color}-${chip.label}-tooltip`} title={negotiatingTooltip}>
+                            {tag}
+                          </Tooltip>
+                        ) : (
+                          tag
+                        );
+                      })}
+                      {lot.is_sampled ? <Tag color="cyan">SAMPLED</Tag> : null}
+                      {lot.reinvoiced_from_lot_id && !lot.auction_lane_status && !lot.private_lane_status ? (
+                        <Tag color="gold">REINVOICED</Tag>
+                      ) : null}
                     </Space>
                   </Descriptions.Item>
                   <Descriptions.Item label="Sampled">{lot.is_sampled ? "Yes" : "No"}</Descriptions.Item>

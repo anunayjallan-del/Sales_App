@@ -63,11 +63,11 @@ export async function GET(req: NextRequest) {
     const snapshot = {
       totalActiveLots: lots.filter((l) => {
         const statuses = activeByLot.get(l.id) ?? [];
-        return statuses.some((s) => ["PENDING", "PENDING_AUCTION_DISPATCH", "IN_TRANSIT", "AWR_PENDING", "AWR_RECEIVED", "CATALOGUED", "RESERVE_SET", "AUCTION_SCHEDULED", "OUT", "HOLD", "REPRINT", "NEGOTIATING", "SAMPLING_SENT", "SOLD_PENDING_DISPATCH", "SOLD"].includes(s));
+        return statuses.some((s) => ["PENDING", "PENDING_AUCTION_DISPATCH", "IN_TRANSIT", "AWR_PENDING", "AWR_RECEIVED", "CATALOGUED", "RESERVE_SET", "OUT", "HOLD", "REPRINT", "NEGOTIATING", "SAMPLING_SENT", "SOLD_PENDING_DISPATCH", "SOLD"].includes(s));
       }).length,
       auctionActive: lots.filter((l) => {
         const statuses = activeByLot.get(l.id) ?? [];
-        return statuses.some((s) => ["PENDING_AUCTION_DISPATCH", "IN_TRANSIT", "AWR_PENDING", "AWR_RECEIVED", "CATALOGUED", "RESERVE_SET", "AUCTION_SCHEDULED", "OUT", "HOLD", "REPRINT"].includes(s));
+        return statuses.some((s) => ["PENDING_AUCTION_DISPATCH", "IN_TRANSIT", "AWR_PENDING", "AWR_RECEIVED", "CATALOGUED", "RESERVE_SET", "OUT", "HOLD", "REPRINT"].includes(s));
       }).length,
       privateActive: deals.filter((d) => ["SAMPLING_SENT", "NEGOTIATING"].includes(d.status)).length,
       lotsUnsold30d: lots.filter((l) => {

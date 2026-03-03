@@ -7,6 +7,7 @@ import { AppShell } from "@/components/app-shell";
 import { fetchJson } from "@/lib/fetcher";
 import { FilterOutlined } from "@ant-design/icons";
 import { App, Button, Card, Dropdown, Input, Modal, Popconfirm, Popover, Segmented, Select, Space, Table, Tag, Typography } from "antd";
+import { handleEnterToSubmit } from "@/lib/keyboard-submit";
 
 type SamplingRow = {
   id: string;
@@ -249,6 +250,10 @@ export default function SamplingPage() {
       message.error(error.message || "Failed to delete action");
     }
   });
+  const submitSamplingBatch = async () => {
+    if (!hasReadyRows || createSamplingBatch.isPending) return;
+    await createSamplingBatch.mutateAsync();
+  };
 
   const partySelectOptions = useMemo(
     () => uniqueNameOptions([...(partyOptions?.buyers ?? []), ...(partyOptions?.brokers ?? [])]),
@@ -330,7 +335,7 @@ export default function SamplingPage() {
   const samplingLotColumns: ColumnsType<LotRow> = [
     { title: "Lot No.", dataIndex: "invoice_number", key: "invoice_number" },
     { title: "Grade", dataIndex: "grade", key: "grade", responsive: ["md"] },
-    { title: "Weight", dataIndex: "net_weight_kg", key: "net_weight_kg", width: 120, responsive: ["md"] },
+    { title: "Quantity", dataIndex: "net_weight_kg", key: "net_weight_kg", width: 120, responsive: ["md"] },
     {
       title: "Status",
       key: "status",
@@ -811,7 +816,12 @@ export default function SamplingPage() {
           </Card>
         ) : (
           <Card title="Add Sampling Entries" variant="borderless">
-            <Space direction="vertical" size={10} style={{ width: "100%" }}>
+            <Space
+              direction="vertical"
+              size={10}
+              style={{ width: "100%" }}
+              onKeyDown={(event) => void handleEnterToSubmit(event, submitSamplingBatch)}
+            >
               <Space style={{ width: "100%", justifyContent: "space-between" }} wrap>
                 <Typography.Text type="secondary">Create entries for a single date.</Typography.Text>
                 <Space>
@@ -841,7 +851,7 @@ export default function SamplingPage() {
                   >
                     Add another row
                   </Button>
-                  <Button type="primary" loading={createSamplingBatch.isPending} onClick={() => createSamplingBatch.mutate()}>
+                  <Button type="primary" loading={createSamplingBatch.isPending} onClick={submitSamplingBatch}>
                     Save
                   </Button>
                 </Space>

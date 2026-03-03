@@ -7,7 +7,6 @@ const auctionProgression: GlobalLotStatus[] = [
   "AWR_RECEIVED",
   "CATALOGUED",
   "RESERVE_SET",
-  "AUCTION_SCHEDULED",
   "SOLD_AUCTION",
   "OUT",
   "HOLD",
@@ -23,7 +22,6 @@ const auctionActiveForConflict = new Set<GlobalLotStatus>([
   "AWR_RECEIVED",
   "CATALOGUED",
   "RESERVE_SET",
-  "AUCTION_SCHEDULED",
   "OUT",
   "HOLD",
   "REPRINT"
@@ -37,7 +35,6 @@ function normalizeAuctionStatus(status: AuctionStatus | null): GlobalLotStatus |
   if (status === "AWR_RECEIVED") return "AWR_RECEIVED";
   if (status === "CATALOGUED") return "CATALOGUED";
   if (status === "RESERVE_SET") return "RESERVE_SET";
-  if (status === "AUCTION_SCHEDULED") return "AUCTION_SCHEDULED";
   if (status === "SOLD_AUCTION") return "SOLD_AUCTION";
   if (status === "OUT") return "OUT";
   if (status === "HOLD") return "HOLD";
@@ -83,7 +80,6 @@ export function validateAuctionTransition(input: {
   const requiresSaleNoStatuses = new Set<GlobalLotStatus>([
     "CATALOGUED",
     "RESERVE_SET",
-    "AUCTION_SCHEDULED",
     "SOLD_AUCTION",
     "OUT",
     "HOLD",

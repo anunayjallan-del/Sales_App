@@ -3,10 +3,11 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { App, Button, Card, Checkbox, Drawer, Empty, Input, InputNumber, Popconfirm, Segmented, Select, Space, Spin, Table, Tag, Typography } from "antd";
+import { App, Button, Card, Checkbox, Drawer, Empty, Input, InputNumber, Modal, Popconfirm, Segmented, Select, Space, Spin, Table, Tag, Tooltip, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { AppShell } from "@/components/app-shell";
 import { fetchJson } from "@/lib/fetcher";
+import { handleEnterToSubmit } from "@/lib/keyboard-submit";
 
 type PendingLotRow = {
   id: string;
@@ -16,6 +17,13 @@ type PendingLotRow = {
   bags: number;
   net_weight_kg: number;
   date_created: string;
+  is_sampled?: boolean;
+  auction_lane_status?: string | null;
+  private_lane_status?: string | null;
+  allowed_actions?: string[];
+  negotiating_buyers?: string[];
+  last_negotiated_on?: string | null;
+  reinvoiced_from_lot_id?: string | null;
 };
 
 type LotActionRow = {
@@ -23,6 +31,13 @@ type LotActionRow = {
   action: string;
   payload?: Record<string, unknown> | null;
   performed_at: string;
+};
+
+type ReinvoiceTargetRow = {
+  id: string;
+  mark: string;
+  invoice_number: string;
+  grade: string;
 };
 
 type PendingDispatchSection = {
@@ -56,6 +71,11 @@ type ActionName =
   | "PAYMENT_RECEIVED";
 
 type ActionField = { key: string; label: string; type: "text" | "date" | "number" | "tags"; required?: boolean };
+type ConflictPromptType =
+  | "EARLY_STAGE_GUIDANCE"
+  | "MIDDLE_STAGE_1_GUIDANCE"
+  | "MIDDLE_STAGE_2_GUIDANCE"
+  | "LATER_STAGE_GUIDANCE";
 
 const WAREHOUSE_OPTIONS = ["Dipti Tea Warehouse", "Nowal Tea Warehouse"] as const;
 const AUCTION_CENTRE_OPTIONS = ["Kolkata", "Guwahati"] as const;
@@ -131,10 +151,8 @@ const actionFieldConfig: Record<ActionName, ActionField[]> = {
     { key: "remarks", label: "Remarks", type: "text" }
   ],
   NEGOTIATING: [
-    { key: "buyer", label: "Buyer", type: "text", required: true },
-    { key: "negotiation_date", label: "Negotiation date", type: "date", required: true },
-    { key: "offered_price", label: "Offered price", type: "number" },
-    { key: "remarks", label: "Remarks", type: "text" }
+    { key: "buyers", label: "Buyers", type: "text", required: true },
+    { key: "negotiation_date", label: "Negotiation date", type: "date", required: true }
   ],
   SOLD_PENDING_DISPATCH: [
     { key: "broker", label: "Broker", type: "text", required: true },
@@ -159,7 +177,7 @@ const actionFieldConfig: Record<ActionName, ActionField[]> = {
   ],
   REINVOICED: [
     { key: "reinvoice_date", label: "Reinvoice date", type: "date", required: true },
-    { key: "new_lot_number", label: "New lot number", type: "text", required: true },
+    { key: "reinvoiced_to_lot_id", label: "Reinvoiced to lot", type: "text", required: true },
     { key: "remarks", label: "Remarks", type: "text" }
   ],
   PAYMENT_RECEIVED: [
@@ -169,6 +187,79 @@ const actionFieldConfig: Record<ActionName, ActionField[]> = {
   ]
 };
 
+const actionNameSet = new Set<ActionName>(Object.keys(actionFieldConfig) as ActionName[]);
+const privateCommitmentActions = new Set<ActionName>(["SOLD_PENDING_DISPATCH", "SOLD_PRIVATE"]);
+const auctionStatusesEarlyStage = new Set<string>(["PENDING_AUCTION_DISPATCH", "IN_TRANSIT"]);
+const auctionStatusesMiddleStage1 = new Set<string>(["AWR_PENDING"]);
+const auctionStatusesMiddleStage2 = new Set<string>(["AWR_RECEIVED"]);
+const auctionStatusesLaterStage = new Set<string>(["CATALOGUED", "RESERVE_SET", "OUT", "HOLD", "REPRINT"]);
+const auctionActiveForPrivateConflict = new Set<string>([
+  "PENDING_AUCTION_DISPATCH",
+  "IN_TRANSIT",
+  "AWR_PENDING",
+  "AWR_RECEIVED",
+  "CATALOGUED",
+  "RESERVE_SET",
+  "OUT",
+  "HOLD",
+  "REPRINT"
+]);
+const conflictPromptOrder: ConflictPromptType[] = [
+  "EARLY_STAGE_GUIDANCE",
+  "MIDDLE_STAGE_1_GUIDANCE",
+  "MIDDLE_STAGE_2_GUIDANCE",
+  "LATER_STAGE_GUIDANCE"
+];
+
+function sanitizeAllowedActions(actions: string[] | undefined): ActionName[] {
+  if (!actions?.length) {
+    return Object.keys(actionFieldConfig) as ActionName[];
+  }
+  return actions
+    .map((action) => String(action) as ActionName)
+    .filter((action) => actionNameSet.has(action));
+}
+
+function resolveConflictPromptType(auctionStatus: string | null | undefined): ConflictPromptType | null {
+  if (!auctionStatus) return null;
+  if (auctionStatusesEarlyStage.has(auctionStatus)) return "EARLY_STAGE_GUIDANCE";
+  if (auctionStatusesMiddleStage1.has(auctionStatus)) return "MIDDLE_STAGE_1_GUIDANCE";
+  if (auctionStatusesMiddleStage2.has(auctionStatus)) return "MIDDLE_STAGE_2_GUIDANCE";
+  if (auctionStatusesLaterStage.has(auctionStatus)) return "LATER_STAGE_GUIDANCE";
+  return null;
+}
+
+function getConflictPromptMessage(promptType: ConflictPromptType): string {
+  if (promptType === "EARLY_STAGE_GUIDANCE") {
+    return "This lot is on the way to auction. Continue only after stopping that move.";
+  }
+  if (promptType === "MIDDLE_STAGE_1_GUIDANCE") {
+    return "The AWR for this lot is on hold. Are you sure you want to continue? If yes, remember to cancel it's AWR.";
+  }
+  if (promptType === "MIDDLE_STAGE_2_GUIDANCE") {
+    return "The AWR for this lot has been generated. Are you sure you want to continue? If yes, remember to stop it's printing.";
+  }
+  return "This lot is already in auction. Are you sure you want to continue? If yes, remember to withdraw the lot.";
+}
+
+function getConflictPromptLabel(promptType: ConflictPromptType): string {
+  if (promptType === "EARLY_STAGE_GUIDANCE") return "Early stage";
+  if (promptType === "MIDDLE_STAGE_1_GUIDANCE") return "Middle stage 1";
+  if (promptType === "MIDDLE_STAGE_2_GUIDANCE") return "Middle stage 2";
+  return "Later stage";
+}
+
+function getConflictAckMeta(action: ActionName, auctionStatus: string | null | undefined): { promptType: ConflictPromptType; message: string } | null {
+  if (!privateCommitmentActions.has(action)) return null;
+  if (!auctionStatus || !auctionActiveForPrivateConflict.has(auctionStatus)) return null;
+  const promptType = resolveConflictPromptType(auctionStatus);
+  if (!promptType) return null;
+  return {
+    promptType,
+    message: getConflictPromptMessage(promptType)
+  };
+}
+
 const modalSelectProps = {
   style: { width: "100%" as const },
   listHeight: 420,
@@ -176,12 +267,32 @@ const modalSelectProps = {
   styles: { popup: { root: { minWidth: 420 } } }
 };
 
-function formatActionName(action: ActionName): string {
+function formatActionName(action: string): string {
   return action
     .toLowerCase()
     .split("_")
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
+}
+
+function formatStatusLabel(status: string): string {
+  if (status === "PENDING_AUCTION_DISPATCH") return "PENDING AUCTION DISPATCH";
+  return status;
+}
+
+function getLaneStatusChips(auctionStatus: string | null | undefined, privateStatus: string | null | undefined): Array<{ color: string; label: string }> {
+  const chips: Array<{ color: string; label: string }> = [];
+  if (auctionStatus) chips.push({ color: "geekblue", label: formatStatusLabel(auctionStatus) });
+  if (privateStatus) chips.push({ color: "purple", label: formatStatusLabel(privateStatus) });
+  if (!chips.length) chips.push({ color: "default", label: "PENDING" });
+  return chips;
+}
+
+function negotiatingTooltipText(buyers: string[] | undefined, negotiatedOn: string | null | undefined): string | null {
+  if (!buyers?.length) return null;
+  const buyersText = buyers.join(", ");
+  if (!negotiatedOn) return `Negotiating with: ${buyersText}`;
+  return `Negotiating with: ${buyersText} (as of ${negotiatedOn})`;
 }
 
 function buildInitialActionData(action: ActionName): Record<string, unknown> {
@@ -233,6 +344,18 @@ export default function DispatchPendingPage() {
   const [selectedAction, setSelectedAction] = useState<ActionName>("SAMPLING");
   const [actionData, setActionData] = useState<Record<string, unknown>>({});
   const [partySearch, setPartySearch] = useState("");
+  const [reinvoiceTargetSearch, setReinvoiceTargetSearch] = useState("");
+  const [selectedLotIds, setSelectedLotIds] = useState<string[]>([]);
+  const [bulkActionModalOpen, setBulkActionModalOpen] = useState(false);
+  const [bulkSelectedAction, setBulkSelectedAction] = useState<ActionName>("SAMPLING");
+  const [bulkActionData, setBulkActionData] = useState<Record<string, unknown>>({});
+  const [bulkPartySearch, setBulkPartySearch] = useState("");
+  const [bulkDispatchModalOpen, setBulkDispatchModalOpen] = useState(false);
+  const [bulkDispatchForm, setBulkDispatchForm] = useState<{ dispatch_date: string; transporter: string; remarks: string }>({
+    dispatch_date: new Date().toISOString().slice(0, 10),
+    transporter: "",
+    remarks: ""
+  });
 
   const pageSize = 60;
   const activeStatus = view === "AUCTION_DISPATCH" ? "PENDING_AUCTION_DISPATCH" : "SOLD_PENDING_DISPATCH";
@@ -247,6 +370,14 @@ export default function DispatchPendingPage() {
   const { data: partyOptions } = useQuery({
     queryKey: ["party-options-dispatch-pending"],
     queryFn: () => fetchJson<{ buyers: string[]; brokers: string[] }>("/api/parties/options")
+  });
+  const { data: reinvoiceTargetsData, isFetching: reinvoiceTargetsLoading } = useQuery({
+    queryKey: ["reinvoice-target-options-dispatch", reinvoiceTargetSearch],
+    queryFn: () =>
+      fetchJson<{ rows: ReinvoiceTargetRow[] }>(
+        `/api/lots/reinvoice-targets?search=${encodeURIComponent(reinvoiceTargetSearch)}&limit=120`
+      ),
+    enabled: actionDetailsOpen && selectedAction === "REINVOICED"
   });
 
   const { data: dispatchContextData, isLoading: dispatchContextLoading } = useQuery({
@@ -299,10 +430,23 @@ export default function DispatchPendingPage() {
     }
   });
   const manageMutation = useMutation({
-    mutationFn: (payload: { lotId: string; action: ActionName; data: Record<string, unknown> }) =>
+    mutationFn: (payload: {
+      lotId: string;
+      action: ActionName;
+      data: Record<string, unknown>;
+      conflictAcknowledged?: boolean;
+      conflictPromptType?: ConflictPromptType;
+      conflictAcknowledgedAt?: string;
+    }) =>
       fetchJson(`/api/lots/${payload.lotId}/actions`, {
         method: "POST",
-        body: JSON.stringify({ action: payload.action, data: payload.data })
+        body: JSON.stringify({
+          action: payload.action,
+          data: payload.data,
+          conflict_acknowledged: payload.conflictAcknowledged,
+          conflict_prompt_type: payload.conflictPromptType,
+          conflict_acknowledged_at: payload.conflictAcknowledgedAt
+        })
       }),
     onSuccess: async () => {
       message.success("Action executed");
@@ -344,9 +488,69 @@ export default function DispatchPendingPage() {
       message.error(error.message || "Failed to delete action");
     }
   });
+  const bulkDispatchMutation = useMutation({
+    mutationFn: async (payload: { lotIds: string[]; data: Record<string, unknown> }) =>
+      Promise.all(
+        payload.lotIds.map((lotId) =>
+          fetchJson(`/api/lots/${lotId}/actions`, {
+            method: "POST",
+            body: JSON.stringify({ action: "AUCTION_DISPATCHED", data: payload.data })
+          })
+        )
+      ),
+    onSuccess: async () => {
+      message.success("Bulk dispatch completed");
+      setBulkDispatchModalOpen(false);
+      setBulkDispatchForm({ dispatch_date: new Date().toISOString().slice(0, 10), transporter: "", remarks: "" });
+      setSelectedLotIds([]);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["dispatch-pending-lots"] }),
+        queryClient.invalidateQueries({ queryKey: ["lots"] })
+      ]);
+    },
+    onError: (error: Error) => {
+      message.error(error.message || "Failed to execute bulk dispatch");
+    }
+  });
+  const bulkManageMutation = useMutation({
+    mutationFn: async (payload: { lots: PendingLotRow[]; action: ActionName; data: Record<string, unknown> }) =>
+      Promise.all(
+        payload.lots.map((lot) => {
+          const conflictMeta = getConflictAckMeta(payload.action, lot.auction_lane_status);
+          return fetchJson(`/api/lots/${lot.id}/actions`, {
+            method: "POST",
+            body: JSON.stringify({
+              action: payload.action,
+              data: payload.data,
+              conflict_acknowledged: conflictMeta ? true : undefined,
+              conflict_prompt_type: conflictMeta?.promptType,
+              conflict_acknowledged_at: conflictMeta ? new Date().toISOString() : undefined
+            })
+          });
+        })
+      ),
+    onSuccess: async () => {
+      message.success("Bulk action executed");
+      setBulkActionModalOpen(false);
+      setBulkActionData({});
+      setSelectedLotIds([]);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["dispatch-pending-lots"] }),
+        queryClient.invalidateQueries({ queryKey: ["lots"] })
+      ]);
+    },
+    onError: (error: Error) => {
+      message.error(error.message || "Failed to execute bulk action");
+    }
+  });
 
   const rows = useMemo(() => data?.lots ?? [], [data?.lots]);
   const total = data?.total ?? 0;
+  const selectedRows = rows.filter((row) => selectedLotIds.includes(row.id));
+  const manageLotAllowedActions = useMemo(
+    () => sanitizeAllowedActions(manageLot?.allowed_actions),
+    [manageLot?.allowed_actions]
+  );
 
   const latestPreparedAdvice = useMemo(() => {
     const actions = dispatchContextData?.rows ?? [];
@@ -405,11 +609,33 @@ export default function DispatchPendingPage() {
   }, [groupingContextByLotId, rows, view]);
   const actionOptions = useMemo(
     () =>
-      (Object.keys(actionFieldConfig) as ActionName[]).map((action) => ({
+      manageLotAllowedActions.map((action) => ({
         label: formatActionName(action),
         value: action
       })),
-    []
+    [manageLotAllowedActions]
+  );
+  const bulkCommonAllowedActions = useMemo(() => {
+    if (!selectedRows.length) return [] as ActionName[];
+    const [head, ...tail] = selectedRows.map((row) => sanitizeAllowedActions(row.allowed_actions));
+    const base = new Set(head);
+    for (const actions of tail) {
+      const current = new Set(actions);
+      for (const action of Array.from(base)) {
+        if (!current.has(action)) base.delete(action);
+      }
+    }
+    return Array.from(base);
+  }, [selectedRows]);
+  const bulkActionOptions = useMemo(
+    () =>
+      bulkCommonAllowedActions
+        .filter((action) => action !== "REINVOICED")
+        .map((action) => ({
+        label: formatActionName(action),
+        value: action
+      })),
+    [bulkCommonAllowedActions]
   );
   const samplingPartyOptions = useMemo(
     () =>
@@ -425,9 +651,18 @@ export default function DispatchPendingPage() {
     if (!q) return samplingPartyOptions;
     return samplingPartyOptions.filter((option) => String(option.label).toLowerCase().includes(q));
   }, [partySearch, samplingPartyOptions]);
+  const filteredBulkSamplingPartyOptions = useMemo(() => {
+    const q = bulkPartySearch.trim().toLowerCase();
+    if (!q) return samplingPartyOptions;
+    return samplingPartyOptions.filter((option) => String(option.label).toLowerCase().includes(q));
+  }, [bulkPartySearch, samplingPartyOptions]);
   const brokerSelectOptions = useMemo(
     () => (partyOptions?.brokers ?? []).map((name) => ({ label: name, value: name })),
     [partyOptions?.brokers]
+  );
+  const buyerSelectOptions = useMemo(
+    () => (partyOptions?.buyers ?? []).map((name) => ({ label: name, value: name })),
+    [partyOptions?.buyers]
   );
   const dispatchBrokerSelectOptions = useMemo(
     () =>
@@ -444,12 +679,22 @@ export default function DispatchPendingPage() {
     () => AUCTION_CENTRE_OPTIONS.map((name) => ({ label: name, value: name })),
     []
   );
+  const reinvoiceTargetOptions = useMemo(
+    () =>
+      (reinvoiceTargetsData?.rows ?? [])
+        .filter((row) => row.id !== manageLot?.id)
+        .map((row) => ({
+          label: `${row.mark} / ${row.invoice_number} (${row.grade})`,
+          value: row.id
+        })),
+    [manageLot?.id, reinvoiceTargetsData?.rows]
+  );
 
   const lotColumns: ColumnsType<PendingLotRow> = [
     { title: "Lot No.", dataIndex: "invoice_number", key: "invoice_number", width: 150 },
     { title: "Grade", dataIndex: "grade", key: "grade", width: 140 },
     { title: "Bags", dataIndex: "bags", key: "bags", width: 100 },
-    { title: "Weight", dataIndex: "net_weight_kg", key: "net_weight_kg", width: 120 },
+    { title: "Quantity", dataIndex: "net_weight_kg", key: "net_weight_kg", width: 120 },
     {
       title: "Packing Date",
       dataIndex: "date_created",
@@ -458,10 +703,48 @@ export default function DispatchPendingPage() {
       render: (value: string) => formatPackingDate(value)
     },
     {
+      title: "Lane Status",
+      key: "lane_status",
+      width: 260,
+      render: (_, row) => {
+        const laneChips = getLaneStatusChips(row.auction_lane_status, row.private_lane_status);
+        const negotiatingTooltip = negotiatingTooltipText(row.negotiating_buyers, row.last_negotiated_on);
+        return (
+          <Space size={[4, 4]} wrap>
+            {laneChips.map((chip) => {
+              const isNegotiatingChip =
+                chip.color === "purple" &&
+                row.private_lane_status === "NEGOTIATING" &&
+                chip.label === "NEGOTIATING" &&
+                Boolean(negotiatingTooltip);
+              const tag = (
+                <Tag key={`${row.id}-${chip.color}-${chip.label}`} color={chip.color}>
+                  {chip.label}
+                </Tag>
+              );
+              return isNegotiatingChip ? (
+                <Tooltip key={`${row.id}-${chip.color}-${chip.label}-tooltip`} title={negotiatingTooltip}>
+                  {tag}
+                </Tooltip>
+              ) : (
+                tag
+              );
+            })}
+            {row.is_sampled ? <Tag color="cyan">SAMPLED</Tag> : null}
+            {row.reinvoiced_from_lot_id && !row.auction_lane_status && !row.private_lane_status ? (
+              <Tag color="gold">REINVOICED</Tag>
+            ) : null}
+          </Space>
+        );
+      }
+    },
+    {
       title: "Action",
       key: "action",
       width: 390,
       render: (_, row) => {
+        const allowedActions = sanitizeAllowedActions(row.allowed_actions);
+        const firstAction = allowedActions[0];
         return (
           <Space size={8}>
             <Button
@@ -483,10 +766,13 @@ export default function DispatchPendingPage() {
             </Link>
             <Button
               size="small"
+              disabled={!firstAction}
+              title={!firstAction ? "No actions available for current status" : undefined}
               onClick={() => {
+                if (!firstAction) return;
                 setManageLot(row);
-                setSelectedAction(view === "AUCTION_DISPATCH" ? "AUCTION_DISPATCHED" : "SOLD_PRIVATE");
-                setActionData(buildInitialActionData(view === "AUCTION_DISPATCH" ? "AUCTION_DISPATCHED" : "SOLD_PRIVATE"));
+                setSelectedAction(firstAction);
+                setActionData(buildInitialActionData(firstAction));
                 setActionSelectOpen(true);
               }}
             >
@@ -512,6 +798,158 @@ export default function DispatchPendingPage() {
     }
   ];
 
+  const submitPendingManageLotAction = async () => {
+    if (!manageLot?.id || manageMutation.isPending) return;
+    if (!manageLotAllowedActions.includes(selectedAction)) {
+      message.error("Selected action is not allowed for this lot.");
+      return;
+    }
+    const required = actionFieldConfig[selectedAction].filter((f) => f.required);
+    const missing = required.find((f) => {
+      const v = actionData[f.key];
+      if (Array.isArray(v)) return v.length === 0;
+      return v === undefined || v === null || String(v).trim() === "";
+    });
+    if (missing) {
+      message.error(`${missing.label} is required`);
+      return;
+    }
+    const conflictMeta = getConflictAckMeta(selectedAction, manageLot.auction_lane_status);
+    if (conflictMeta) {
+      const acknowledged = await new Promise<boolean>((resolve) => {
+        Modal.confirm({
+          title: "Warning!",
+          content: (
+            <Space direction="vertical" size={6}>
+              <Typography.Text>
+                Lot: {manageLot.mark} / {manageLot.invoice_number}
+              </Typography.Text>
+              <Typography.Text>{conflictMeta.message}</Typography.Text>
+            </Space>
+          ),
+          okText: "Continue",
+          cancelText: "Cancel",
+          onOk: () => resolve(true),
+          onCancel: () => resolve(false)
+        });
+      });
+      if (!acknowledged) return;
+      await manageMutation.mutateAsync({
+        lotId: manageLot.id,
+        action: selectedAction,
+        data: actionData,
+        conflictAcknowledged: true,
+        conflictPromptType: conflictMeta.promptType,
+        conflictAcknowledgedAt: new Date().toISOString()
+      });
+      return;
+    }
+    await manageMutation.mutateAsync({
+      lotId: manageLot.id,
+      action: selectedAction,
+      data: actionData
+    });
+  };
+
+  const submitAuctionDispatched = async () => {
+    if (!dispatchLot?.id || dispatchMutation.isPending) return;
+    if (!dispatchForm.dispatch_date.trim()) {
+      message.error("Dispatch date is required");
+      return;
+    }
+    if (!dispatchForm.transporter.trim()) {
+      message.error("Transporter is required");
+      return;
+    }
+    await dispatchMutation.mutateAsync({
+      lotId: dispatchLot.id,
+      data: {
+        dispatch_date: dispatchForm.dispatch_date,
+        transporter: dispatchForm.transporter,
+        remarks: dispatchForm.remarks || undefined
+      }
+    });
+  };
+  const submitBulkDispatch = async () => {
+    if (!selectedLotIds.length || bulkDispatchMutation.isPending) return;
+    if (!bulkDispatchForm.dispatch_date.trim()) {
+      message.error("Dispatch date is required");
+      return;
+    }
+    if (!bulkDispatchForm.transporter.trim()) {
+      message.error("Transporter is required");
+      return;
+    }
+    await bulkDispatchMutation.mutateAsync({
+      lotIds: selectedLotIds,
+      data: {
+        dispatch_date: bulkDispatchForm.dispatch_date,
+        transporter: bulkDispatchForm.transporter,
+        remarks: bulkDispatchForm.remarks || undefined
+      }
+    });
+  };
+  const submitBulkManageLotAction = async () => {
+    if (!selectedLotIds.length || bulkManageMutation.isPending) return;
+    if (!bulkActionOptions.some((option) => option.value === bulkSelectedAction)) {
+      message.error("Selected bulk action is not allowed for all selected lots.");
+      return;
+    }
+    const required = actionFieldConfig[bulkSelectedAction].filter((f) => f.required);
+    const missing = required.find((f) => {
+      const v = bulkActionData[f.key];
+      if (Array.isArray(v)) return v.length === 0;
+      return v === undefined || v === null || String(v).trim() === "";
+    });
+    if (missing) {
+      message.error(`${missing.label} is required`);
+      return;
+    }
+    const conflicts = selectedRows
+      .map((row) => ({ row, conflict: getConflictAckMeta(bulkSelectedAction, row.auction_lane_status) }))
+      .filter((entry) => Boolean(entry.conflict));
+    if (conflicts.length) {
+      const countsByPrompt = new Map<ConflictPromptType, number>();
+      for (const entry of conflicts) {
+        const promptType = entry.conflict?.promptType as ConflictPromptType | undefined;
+        if (!promptType) continue;
+        countsByPrompt.set(promptType, (countsByPrompt.get(promptType) ?? 0) + 1);
+      }
+      const acknowledged = await new Promise<boolean>((resolve) => {
+        Modal.confirm({
+          title: "Warning!",
+          content: (
+            <Space direction="vertical" size={6}>
+              <Typography.Text>
+                {conflicts.length} selected lot(s) need confirmation before continuing.
+              </Typography.Text>
+              {conflictPromptOrder
+                .filter((promptType) => (countsByPrompt.get(promptType) ?? 0) > 0)
+                .map((promptType) => (
+                  <Typography.Text key={`dispatch-bulk-warning-${promptType}`}>
+                    {getConflictPromptLabel(promptType)} ({countsByPrompt.get(promptType)} lot(s)): {getConflictPromptMessage(promptType)}
+                  </Typography.Text>
+                ))}
+            </Space>
+          ),
+          okText: "Continue",
+          cancelText: "Cancel",
+          onOk: () => resolve(true),
+          onCancel: () => resolve(false)
+        });
+      });
+      if (!acknowledged) return;
+    }
+    await bulkManageMutation.mutateAsync({
+      lots: selectedRows,
+      action: bulkSelectedAction,
+      data: bulkActionData
+    });
+  };
+  const toggleSelectedLot = (lotId: string) => {
+    setSelectedLotIds((prev) => (prev.includes(lotId) ? prev.filter((id) => id !== lotId) : [...prev, lotId]));
+  };
+
   return (
     <AppShell title="Pending Dispatches">
       <Card variant="borderless">
@@ -521,6 +959,7 @@ export default function DispatchPendingPage() {
             onChange={(v) => {
               setView(v as "AUCTION_DISPATCH" | "PRIVATE");
               setPage(1);
+              setSelectedLotIds([]);
             }}
             options={[
               { label: "Auction", value: "AUCTION_DISPATCH" },
@@ -554,7 +993,7 @@ export default function DispatchPendingPage() {
                             <Tag color={view === "AUCTION_DISPATCH" ? "gold" : "volcano"}>
                               Total Bags: {markGroup.totalBags}
                             </Tag>
-                            <Tag color="blue">Total Weight: {markGroup.totalWeight} kgs</Tag>
+                            <Tag color="blue">Total Quantity: {markGroup.totalWeight} kgs</Tag>
                           </Space>
                         }
                       >
@@ -562,6 +1001,18 @@ export default function DispatchPendingPage() {
                           rowKey="id"
                           columns={lotColumns}
                           dataSource={markGroup.lots}
+                          rowSelection={{
+                            selectedRowKeys: selectedLotIds,
+                            onChange: (keys) => setSelectedLotIds(keys as string[])
+                          }}
+                          onRow={(record) => ({
+                            onClick: (event) => {
+                              const target = event.target as HTMLElement;
+                              if (target.closest("button, a, input, .ant-checkbox-wrapper, .ant-select, .ant-input-number")) return;
+                              toggleSelectedLot(record.id);
+                            }
+                          })}
+                          rowClassName={() => "clickable-lot-row"}
                           pagination={false}
                           size="small"
                           scroll={{ x: 920 }}
@@ -577,14 +1028,20 @@ export default function DispatchPendingPage() {
             <div style={{ display: "flex", justifyContent: "flex-end" }}>
               <Button
                 disabled={page <= 1}
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                onClick={() => {
+                  setPage((p) => Math.max(1, p - 1));
+                  setSelectedLotIds([]);
+                }}
                 style={{ marginRight: 8 }}
               >
                 Previous
               </Button>
               <Button
                 disabled={page * pageSize >= total}
-                onClick={() => setPage((p) => p + 1)}
+                onClick={() => {
+                  setPage((p) => p + 1);
+                  setSelectedLotIds([]);
+                }}
                 style={{ marginRight: 12 }}
               >
                 Next
@@ -597,6 +1054,51 @@ export default function DispatchPendingPage() {
         </Space>
       </Card>
 
+      {selectedLotIds.length > 0 ? (
+        <div
+          style={{
+            position: "fixed",
+            left: "50%",
+            bottom: 16,
+            transform: "translateX(-50%)",
+            zIndex: 45,
+            width: "min(900px, calc(100vw - 24px))"
+          }}
+        >
+          <Card variant="borderless" style={{ boxShadow: "0 12px 36px rgba(0,0,0,0.18)" }}>
+            <Space wrap size={[8, 8]} style={{ width: "100%", justifyContent: "space-between" }}>
+              <Typography.Text strong>Selected lots: {selectedLotIds.length}</Typography.Text>
+              <Space size={8}>
+                {view === "AUCTION_DISPATCH" ? (
+                  <Button
+                    onClick={() => {
+                      setBulkDispatchModalOpen(true);
+                      setBulkDispatchForm({ dispatch_date: new Date().toISOString().slice(0, 10), transporter: "", remarks: "" });
+                    }}
+                  >
+                    Bulk Dispatch
+                  </Button>
+                ) : null}
+                <Button
+                  disabled={!bulkActionOptions.length}
+                  title={!bulkActionOptions.length ? "No common actions for selected lots" : undefined}
+                  onClick={() => {
+                    const first = bulkActionOptions[0]?.value;
+                    if (!first) return;
+                    setBulkActionModalOpen(true);
+                    setBulkSelectedAction(first);
+                    setBulkActionData(buildInitialActionData(first));
+                  }}
+                >
+                  Bulk Manage Lot
+                </Button>
+                <Button onClick={() => setSelectedLotIds([])}>Clear Selection</Button>
+              </Space>
+            </Space>
+          </Card>
+        </div>
+      ) : null}
+
       <Drawer
         title={actionDetailsOpen ? "Manage Lot • Step 2 of 2" : "Manage Lot • Step 1 of 2"}
         open={actionSelectOpen || actionDetailsOpen}
@@ -606,6 +1108,7 @@ export default function DispatchPendingPage() {
           setActionDetailsOpen(false);
           setManageLot(null);
           setActionData({});
+          setReinvoiceTargetSearch("");
         }}
         placement="right"
         footer={
@@ -622,57 +1125,87 @@ export default function DispatchPendingPage() {
               <Button
                 type="primary"
                 loading={manageMutation.isPending}
-                onClick={async () => {
-                  if (!manageLot?.id) return;
-                  const required = actionFieldConfig[selectedAction].filter((f) => f.required);
-                  const missing = required.find((f) => {
-                    const v = actionData[f.key];
-                    if (Array.isArray(v)) return v.length === 0;
-                    return v === undefined || v === null || String(v).trim() === "";
-                  });
-                  if (missing) {
-                    message.error(`${missing.label} is required`);
-                    return;
-                  }
-                  await manageMutation.mutateAsync({
-                    lotId: manageLot.id,
-                    action: selectedAction,
-                    data: actionData
-                  });
-                }}
+                onClick={submitPendingManageLotAction}
               >
                 Save Action
               </Button>
             </Space>
           ) : (
             <Space style={{ width: "100%", justifyContent: "flex-end" }}>
-              <Button onClick={() => setActionSelectOpen(false)}>Cancel</Button>
+              <Button
+                onClick={() => {
+                  setActionSelectOpen(false);
+                  setReinvoiceTargetSearch("");
+                }}
+              >
+                Cancel
+              </Button>
             </Space>
           )
         }
       >
         {!actionDetailsOpen ? (
-          <Space direction="vertical" style={{ width: "100%" }} size={12}>
+          <Space
+            direction="vertical"
+            style={{ width: "100%" }}
+            size={12}
+            onKeyDown={(event) => void handleEnterToSubmit(event, submitPendingManageLotAction)}
+          >
             <Card size="small" style={{ background: "#fafafa" }}>
               <Typography.Text type="secondary">Selected Lot</Typography.Text>
               <br />
               <Typography.Text strong>
                 {manageLot ? `${manageLot.mark} / ${manageLot.invoice_number}` : "No lot selected"}
               </Typography.Text>
+              <br />
+              <Space size={[6, 6]} wrap style={{ marginTop: 6 }}>
+                {getLaneStatusChips(manageLot?.auction_lane_status, manageLot?.private_lane_status).map((chip) => {
+                  const negotiatingTooltip = negotiatingTooltipText(
+                    manageLot?.negotiating_buyers,
+                    manageLot?.last_negotiated_on
+                  );
+                  const isNegotiatingChip =
+                    chip.color === "purple" &&
+                    manageLot?.private_lane_status === "NEGOTIATING" &&
+                    chip.label === "NEGOTIATING" &&
+                    Boolean(negotiatingTooltip);
+                  const tag = (
+                    <Tag key={`manage-${chip.color}-${chip.label}`} color={chip.color}>
+                      {chip.label}
+                    </Tag>
+                  );
+                  return isNegotiatingChip ? (
+                    <Tooltip key={`manage-${chip.color}-${chip.label}-tooltip`} title={negotiatingTooltip}>
+                      {tag}
+                    </Tooltip>
+                  ) : (
+                    tag
+                  );
+                })}
+                {manageLot?.is_sampled ? <Tag color="cyan">SAMPLED</Tag> : null}
+                {manageLot?.reinvoiced_from_lot_id && !manageLot?.auction_lane_status && !manageLot?.private_lane_status ? (
+                  <Tag color="gold">REINVOICED</Tag>
+                ) : null}
+              </Space>
             </Card>
-            <Typography.Text type="secondary">Choose an action</Typography.Text>
+            <Space direction="vertical" style={{ width: "100%" }} size={6}>
+              <Typography.Text type="secondary">Choose an action</Typography.Text>
+            </Space>
             <Select
               size="large"
               value={selectedAction}
               onChange={(v) => {
                 setSelectedAction(v);
                 setActionData(buildInitialActionData(v));
+                setReinvoiceTargetSearch("");
                 setActionSelectOpen(false);
                 setActionDetailsOpen(true);
               }}
               options={actionOptions}
+              disabled={!actionOptions.length}
               {...modalSelectProps}
             />
+            {!actionOptions.length ? <Typography.Text type="secondary">No actions are available for this lot right now.</Typography.Text> : null}
           </Space>
         ) : (
           <Space direction="vertical" style={{ width: "100%" }} size={12}>
@@ -693,7 +1226,17 @@ export default function DispatchPendingPage() {
                   {field.required ? " *" : ""}
                 </Typography.Text>
                 {field.type === "text" ? (
-                  field.key === "broker" ? (
+                  field.key === "buyers" ? (
+                    <Select
+                      mode="multiple"
+                      showSearch
+                      optionFilterProp="label"
+                      value={Array.isArray(actionData[field.key]) ? (actionData[field.key] as string[]) : []}
+                      options={buyerSelectOptions}
+                      onChange={(value) => setActionData((prev) => ({ ...prev, [field.key]: value.map((item) => String(item)) }))}
+                      {...modalSelectProps}
+                    />
+                  ) : field.key === "broker" ? (
                     <Select
                       showSearch
                       optionFilterProp="label"
@@ -713,6 +1256,18 @@ export default function DispatchPendingPage() {
                     <Select
                       value={String(actionData[field.key] ?? "") || undefined}
                       options={auctionCentreSelectOptions}
+                      onChange={(value) => setActionData((prev) => ({ ...prev, [field.key]: String(value) }))}
+                      {...modalSelectProps}
+                    />
+                  ) : field.key === "reinvoiced_to_lot_id" ? (
+                    <Select
+                      showSearch
+                      value={String(actionData[field.key] ?? "") || undefined}
+                      options={reinvoiceTargetOptions}
+                      filterOption={false}
+                      onSearch={(value) => setReinvoiceTargetSearch(String(value))}
+                      notFoundContent={reinvoiceTargetsLoading ? "Loading..." : "No pending lots found"}
+                      placeholder="Select target pending lot"
                       onChange={(value) => setActionData((prev) => ({ ...prev, [field.key]: String(value) }))}
                       {...modalSelectProps}
                     />
@@ -740,7 +1295,12 @@ export default function DispatchPendingPage() {
                 {field.type === "tags" ? (
                   field.key === "parties" ? (
                     <Space direction="vertical" style={{ width: "100%" }} size={8}>
-                      <Input placeholder="Search buyer/broker" value={partySearch} onChange={(e) => setPartySearch(e.target.value)} />
+                      <Input
+                        placeholder="Search buyer/broker"
+                        value={partySearch}
+                        data-enter-submit="ignore"
+                        onChange={(e) => setPartySearch(e.target.value)}
+                      />
                       <div style={{ maxHeight: 220, overflowY: "auto", border: "1px solid #f0f0f0", borderRadius: 8, padding: 8 }}>
                         <Checkbox.Group
                           style={{ width: "100%" }}
@@ -772,6 +1332,7 @@ export default function DispatchPendingPage() {
           style={{ position: "fixed", right: 16, bottom: 16, width: 420, zIndex: 50, boxShadow: "0 10px 30px rgba(0,0,0,0.2)" }}
           title={`Dispatch: ${dispatchLot.mark}/${dispatchLot.invoice_number}`}
           extra={<Button size="small" onClick={() => setDispatchLot(null)}>Close</Button>}
+          onKeyDown={(event) => void handleEnterToSubmit(event, submitAuctionDispatched)}
         >
           <Space direction="vertical" style={{ width: "100%" }} size={10}>
             <Card
@@ -822,25 +1383,7 @@ export default function DispatchPendingPage() {
               <Button
                 type="primary"
                 loading={dispatchMutation.isPending}
-                onClick={async () => {
-                  if (!dispatchLot?.id) return;
-                  if (!dispatchForm.dispatch_date.trim()) {
-                    message.error("Dispatch date is required");
-                    return;
-                  }
-                  if (!dispatchForm.transporter.trim()) {
-                    message.error("Transporter is required");
-                    return;
-                  }
-                  await dispatchMutation.mutateAsync({
-                    lotId: dispatchLot.id,
-                    data: {
-                      dispatch_date: dispatchForm.dispatch_date,
-                      transporter: dispatchForm.transporter,
-                      remarks: dispatchForm.remarks || undefined
-                    }
-                  });
-                }}
+                onClick={submitAuctionDispatched}
               >
                 Dispatch
               </Button>
@@ -848,6 +1391,162 @@ export default function DispatchPendingPage() {
           </Space>
         </Card>
       ) : null}
+
+      <Modal
+        title={`Bulk Dispatch (${selectedLotIds.length} lots)`}
+        open={bulkDispatchModalOpen}
+        onCancel={() => setBulkDispatchModalOpen(false)}
+        onOk={submitBulkDispatch}
+        okText="Dispatch"
+        okButtonProps={{ loading: bulkDispatchMutation.isPending }}
+      >
+        <Space direction="vertical" size={10} style={{ width: "100%" }} onKeyDown={(event) => void handleEnterToSubmit(event, submitBulkDispatch)}>
+          <div>
+            <Typography.Text type="secondary">Dispatch date *</Typography.Text>
+            <Input
+              type="date"
+              value={bulkDispatchForm.dispatch_date}
+              onChange={(e) => setBulkDispatchForm((prev) => ({ ...prev, dispatch_date: e.target.value }))}
+            />
+          </div>
+          <div>
+            <Typography.Text type="secondary">Transporter *</Typography.Text>
+            <Input
+              value={bulkDispatchForm.transporter}
+              onChange={(e) => setBulkDispatchForm((prev) => ({ ...prev, transporter: e.target.value }))}
+            />
+          </div>
+          <div>
+            <Typography.Text type="secondary">Remarks</Typography.Text>
+            <Input
+              value={bulkDispatchForm.remarks}
+              onChange={(e) => setBulkDispatchForm((prev) => ({ ...prev, remarks: e.target.value }))}
+            />
+          </div>
+        </Space>
+      </Modal>
+
+      <Modal
+        title={`Bulk Manage Lot (${selectedLotIds.length} lots)`}
+        open={bulkActionModalOpen}
+        onCancel={() => setBulkActionModalOpen(false)}
+        onOk={submitBulkManageLotAction}
+        okText="Save Action"
+        okButtonProps={{ loading: bulkManageMutation.isPending }}
+      >
+        <Space
+          direction="vertical"
+          style={{ width: "100%" }}
+          onKeyDown={(event) => void handleEnterToSubmit(event, submitBulkManageLotAction)}
+        >
+          <Select
+            value={bulkSelectedAction}
+            onChange={(value) => {
+              setBulkSelectedAction(value);
+              setBulkActionData(buildInitialActionData(value));
+            }}
+            options={bulkActionOptions}
+            disabled={!bulkActionOptions.length}
+            {...modalSelectProps}
+          />
+          {!bulkActionOptions.length ? (
+            <Typography.Text type="secondary">No common actions for selected lots’ current statuses.</Typography.Text>
+          ) : null}
+          {(actionFieldConfig[bulkSelectedAction] ?? []).map((field) => (
+            <div key={field.key}>
+              <Typography.Text type="secondary">
+                {field.label}
+                {field.required ? " *" : ""}
+              </Typography.Text>
+              {field.type === "text" ? (
+                field.key === "buyers" ? (
+                  <Select
+                    mode="multiple"
+                    showSearch
+                    optionFilterProp="label"
+                    value={Array.isArray(bulkActionData[field.key]) ? (bulkActionData[field.key] as string[]) : []}
+                    options={buyerSelectOptions}
+                    onChange={(value) => setBulkActionData((prev) => ({ ...prev, [field.key]: value.map((item) => String(item)) }))}
+                    {...modalSelectProps}
+                  />
+                ) : field.key === "broker" ? (
+                  <Select
+                    showSearch
+                    optionFilterProp="label"
+                    value={String(bulkActionData[field.key] ?? "") || undefined}
+                    options={bulkSelectedAction === "DISPATCH_TO_AUCTION" ? dispatchBrokerSelectOptions : brokerSelectOptions}
+                    onChange={(value) => setBulkActionData((prev) => applyDispatchMappings(prev, field.key, String(value)))}
+                    {...modalSelectProps}
+                  />
+                ) : field.key === "warehouse" ? (
+                  <Select
+                    value={String(bulkActionData[field.key] ?? "") || undefined}
+                    options={warehouseSelectOptions}
+                    onChange={(value) => setBulkActionData((prev) => applyDispatchMappings(prev, field.key, String(value)))}
+                    {...modalSelectProps}
+                  />
+                ) : field.key === "auction_centre" ? (
+                  <Select
+                    value={String(bulkActionData[field.key] ?? "") || undefined}
+                    options={auctionCentreSelectOptions}
+                    onChange={(value) => setBulkActionData((prev) => ({ ...prev, [field.key]: String(value) }))}
+                    {...modalSelectProps}
+                  />
+                ) : (
+                  <Input
+                    value={String(bulkActionData[field.key] ?? "")}
+                    onChange={(e) => setBulkActionData((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                  />
+                )
+              ) : null}
+              {field.type === "date" ? (
+                <Input
+                  type="date"
+                  value={String(bulkActionData[field.key] ?? "")}
+                  onChange={(e) => setBulkActionData((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                />
+              ) : null}
+              {field.type === "number" ? (
+                <InputNumber
+                  style={{ width: "100%" }}
+                  value={typeof bulkActionData[field.key] === "number" ? (bulkActionData[field.key] as number) : undefined}
+                  onChange={(value) => setBulkActionData((prev) => ({ ...prev, [field.key]: value ?? null }))}
+                />
+              ) : null}
+              {field.type === "tags" ? (
+                field.key === "parties" ? (
+                  <Space direction="vertical" style={{ width: "100%" }} size={8}>
+                    <Input
+                      placeholder="Search buyer/broker"
+                      data-enter-submit="ignore"
+                      value={bulkPartySearch}
+                      onChange={(e) => setBulkPartySearch(e.target.value)}
+                    />
+                    <div style={{ maxHeight: 220, overflowY: "auto", border: "1px solid #f0f0f0", borderRadius: 8, padding: 8 }}>
+                      <Checkbox.Group
+                        style={{ width: "100%" }}
+                        value={Array.isArray(bulkActionData[field.key]) ? (bulkActionData[field.key] as string[]) : []}
+                        options={filteredBulkSamplingPartyOptions}
+                        onChange={(values) =>
+                          setBulkActionData((prev) => ({ ...prev, [field.key]: values.map((value) => String(value)) }))
+                        }
+                      />
+                    </div>
+                  </Space>
+                ) : (
+                  <Select
+                    mode="tags"
+                    value={Array.isArray(bulkActionData[field.key]) ? (bulkActionData[field.key] as string[]) : []}
+                    onChange={(value) => setBulkActionData((prev) => ({ ...prev, [field.key]: value }))}
+                    showSearch
+                    {...modalSelectProps}
+                  />
+                )
+              ) : null}
+            </div>
+          ))}
+        </Space>
+      </Modal>
     </AppShell>
   );
 }

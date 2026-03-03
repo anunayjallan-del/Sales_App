@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { auctionStatuses, globalLotStatuses, lotStatusEventSources, privateDealStatuses } from "@/lib/types";
-import { actionNames } from "@/server/services/lot-actions";
+import { acceptedConflictPromptTypes, actionNames } from "@/server/services/lot-actions";
 
 export const lotQuerySchema = z.object({
   search: z.string().optional(),
@@ -98,5 +98,8 @@ export const createLotStatusEventSchema = z.object({
 
 export const createLotActionSchema = z.object({
   action: z.enum(actionNames),
-  data: z.record(z.string(), z.any()).default({})
+  data: z.record(z.string(), z.any()).default({}),
+  conflict_acknowledged: z.boolean().optional(),
+  conflict_prompt_type: z.enum(acceptedConflictPromptTypes).optional(),
+  conflict_acknowledged_at: z.string().optional()
 });

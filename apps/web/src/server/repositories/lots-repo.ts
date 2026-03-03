@@ -8,6 +8,7 @@ import {
 } from "@/lib/types";
 import { deriveActiveStatuses, deriveWarnings, rankAuctionStatusForBadge, rankPrivateStatusForBadge } from "@/server/services/flat-status-engine";
 import { resolveLifecycleStatus } from "@/server/services/status-engine";
+import { getAllowedActionsForStatuses, splitLotStatusLanes } from "@/server/services/lot-actions";
 
 const db = () => getSupabaseAdmin();
 
@@ -78,10 +79,15 @@ function withFlatStatuses<T extends LotWithRelations>(lot: T, activeStatusesFrom
       ? fallbackWithoutSamplingSent
       : ["PENDING"];
   const warnings = deriveWarnings(active_statuses);
+  const lanes = splitLotStatusLanes(active_statuses);
+  const allowed_actions = getAllowedActionsForStatuses(active_statuses);
 
   return {
     ...lot,
     active_statuses,
+    auction_lane_status: lanes.auction,
+    private_lane_status: lanes.private,
+    allowed_actions,
     warnings,
     auction_status_badge: rankAuctionStatusForBadge(lot.auction_tracks?.[0]?.auction_status ?? null),
     private_status_badge: rankPrivateStatusForBadge(privateStatuses)
@@ -92,6 +98,16 @@ type SamplingSnapshot = {
   is_sampled: boolean;
   last_sampled_on: string | null;
   recent_sampling_parties: string[];
+};
+
+type ReinvoiceSnapshot = {
+  reinvoiced_from_lot_id: string | null;
+  reinvoiced_on: string | null;
+};
+
+type NegotiatingSnapshot = {
+  negotiating_buyers: string[];
+  last_negotiated_on: string | null;
 };
 
 function normalizeIsoDate(value: unknown): string | null {
@@ -113,6 +129,29 @@ function parseSamplingParties(payload: unknown): string[] {
         .filter(Boolean)
     )
   );
+}
+
+function parseNegotiatingBuyers(payload: unknown): string[] {
+  if (!payload || typeof payload !== "object") return [];
+  const record = payload as Record<string, unknown>;
+  const buyersRaw = record.buyers;
+  if (Array.isArray(buyersRaw)) {
+    return Array.from(
+      new Set(
+        buyersRaw
+          .map((buyer) => String(buyer ?? "").trim())
+          .filter(Boolean)
+      )
+    );
+  }
+  const legacyBuyer = String(record.buyer ?? "").trim();
+  return legacyBuyer ? [legacyBuyer] : [];
+}
+
+function parseReinvoicedFrom(meta: unknown): string | null {
+  if (!meta || typeof meta !== "object") return null;
+  const value = String((meta as Record<string, unknown>).reinvoiced_from ?? "").trim();
+  return value || null;
 }
 
 async function getSamplingSnapshotByLotIds(lotIds: string[]) {
@@ -144,6 +183,77 @@ async function getSamplingSnapshotByLotIds(lotIds: string[]) {
       const mergedParties = new Set([...existing.recent_sampling_parties, ...parseSamplingParties(row.payload)]);
       existing.recent_sampling_parties = Array.from(mergedParties).sort((a, b) => a.localeCompare(b));
       result.set(lotId, existing);
+    }
+  }
+  return result;
+}
+
+async function getReinvoiceSnapshotByLotIds(lotIds: string[]) {
+  const result = new Map<string, ReinvoiceSnapshot>();
+  if (!lotIds.length) return result;
+
+  const chunkSize = 200;
+  for (let i = 0; i < lotIds.length; i += chunkSize) {
+    const chunk = lotIds.slice(i, i + chunkSize);
+    const { data, error } = await db()
+      .from("lot_status_events")
+      .select("lot_id,meta,effective_at,status")
+      .eq("status", "PENDING")
+      .in("lot_id", chunk);
+    if (error) throw error;
+    for (const row of data ?? []) {
+      const lotId = String(row.lot_id);
+      const reinvoicedFrom = parseReinvoicedFrom(row.meta);
+      if (!reinvoicedFrom) continue;
+      const effectiveAt = normalizeIsoDate(row.effective_at);
+      const existing = result.get(lotId);
+      if (existing?.reinvoiced_on && effectiveAt && existing.reinvoiced_on > effectiveAt) continue;
+      result.set(lotId, {
+        reinvoiced_from_lot_id: reinvoicedFrom,
+        reinvoiced_on: effectiveAt
+      });
+    }
+  }
+  return result;
+}
+
+async function getNegotiatingSnapshotByLotIds(lotIds: string[]) {
+  const result = new Map<string, NegotiatingSnapshot>();
+  if (!lotIds.length) return result;
+
+  const chunkSize = 200;
+  for (let i = 0; i < lotIds.length; i += chunkSize) {
+    const chunk = lotIds.slice(i, i + chunkSize);
+    const { data, error } = await db()
+      .from("lot_actions")
+      .select("lot_id,payload,performed_at")
+      .eq("action", "NEGOTIATING")
+      .in("lot_id", chunk);
+    if (error) throw error;
+    for (const row of data ?? []) {
+      const lotId = String(row.lot_id);
+      const buyers = parseNegotiatingBuyers(row.payload);
+      if (!buyers.length) continue;
+      const negotiatedOn =
+        normalizeIsoDate((row.payload as Record<string, unknown> | null)?.negotiation_date) ??
+        normalizeIsoDate(row.performed_at);
+      const existing = result.get(lotId);
+      if (!existing) {
+        result.set(lotId, { negotiating_buyers: buyers, last_negotiated_on: negotiatedOn });
+        continue;
+      }
+      const existingDate = existing.last_negotiated_on ?? "";
+      const nextDate = negotiatedOn ?? "";
+      if (nextDate > existingDate) {
+        result.set(lotId, { negotiating_buyers: buyers, last_negotiated_on: negotiatedOn });
+      } else if (nextDate === existingDate) {
+        result.set(lotId, {
+          negotiating_buyers: Array.from(new Set([...existing.negotiating_buyers, ...buyers])).sort((a, b) =>
+            a.localeCompare(b)
+          ),
+          last_negotiated_on: existing.last_negotiated_on
+        });
+      }
     }
   }
   return result;
@@ -252,6 +362,8 @@ export async function listLots(filters: {
     }));
     const activeByLot = await getActiveStatusesForLots(lotRows.map((l) => l.id));
     const samplingByLot = await getSamplingSnapshotByLotIds(lotRows.map((l) => String(l.id)));
+    const reinvoiceByLot = await getReinvoiceSnapshotByLotIds(lotRows.map((l) => String(l.id)));
+    const negotiatingByLot = await getNegotiatingSnapshotByLotIds(lotRows.map((l) => String(l.id)));
     const lots = lotRows.map((lot) =>
       ({
         ...withFlatStatuses(withComputedLifecycle(lot), activeByLot.get(lot.id) ?? null),
@@ -259,6 +371,14 @@ export async function listLots(filters: {
           is_sampled: false,
           last_sampled_on: null,
           recent_sampling_parties: []
+        }),
+        ...(negotiatingByLot.get(String(lot.id)) ?? {
+          negotiating_buyers: [],
+          last_negotiated_on: null
+        }),
+        ...(reinvoiceByLot.get(String(lot.id)) ?? {
+          reinvoiced_from_lot_id: null,
+          reinvoiced_on: null
         })
       })
     );
@@ -303,6 +423,8 @@ export async function listLots(filters: {
   }));
   const activeByLot = await getActiveStatusesForLots(allLotRows.map((l) => l.id));
   const samplingByLot = await getSamplingSnapshotByLotIds(allLotRows.map((l) => String(l.id)));
+  const reinvoiceByLot = await getReinvoiceSnapshotByLotIds(allLotRows.map((l) => String(l.id)));
+  const negotiatingByLot = await getNegotiatingSnapshotByLotIds(allLotRows.map((l) => String(l.id)));
   const enriched = allLotRows.map((lot) =>
     ({
       ...withFlatStatuses(withComputedLifecycle(lot), activeByLot.get(lot.id) ?? null),
@@ -310,6 +432,14 @@ export async function listLots(filters: {
         is_sampled: false,
         last_sampled_on: null,
         recent_sampling_parties: []
+      }),
+      ...(negotiatingByLot.get(String(lot.id)) ?? {
+        negotiating_buyers: [],
+        last_negotiated_on: null
+      }),
+      ...(reinvoiceByLot.get(String(lot.id)) ?? {
+        reinvoiced_from_lot_id: null,
+        reinvoiced_on: null
       })
     })
   );
@@ -346,9 +476,23 @@ export async function getLotWithRelations(lotId: string) {
     last_sampled_on: null,
     recent_sampling_parties: []
   };
+  const reinvoiceSnapshot = (
+    await getReinvoiceSnapshotByLotIds([lotId])
+  ).get(lotId) ?? {
+    reinvoiced_from_lot_id: null,
+    reinvoiced_on: null
+  };
+  const negotiatingSnapshot = (
+    await getNegotiatingSnapshotByLotIds([lotId])
+  ).get(lotId) ?? {
+    negotiating_buyers: [],
+    last_negotiated_on: null
+  };
   return {
     ...lotWithFlat,
     ...samplingSnapshot,
+    ...negotiatingSnapshot,
+    ...reinvoiceSnapshot,
     status_events: (data.lot_status_events ?? []).sort((a: { effective_at: string }, b: { effective_at: string }) =>
       b.effective_at.localeCompare(a.effective_at)
     ),
