@@ -12,7 +12,8 @@ import {
   TruckOutlined,
   UploadOutlined,
   ExperimentOutlined,
-  ClockCircleOutlined
+  ClockCircleOutlined,
+  BookOutlined
 } from "@ant-design/icons";
 import { Button, Drawer, Grid, Layout, Menu, Space, Typography } from "antd";
 
@@ -21,6 +22,7 @@ const links = [
   { href: "/lots", label: "Lots", icon: <AppstoreOutlined /> },
   { href: "/sampling", label: "Sampling", icon: <ExperimentOutlined /> },
   { href: "/dispatch-pending", label: "Pending Dispatches", icon: <ClockCircleOutlined /> },
+  { href: "/auction-catalogue", label: "Auction Catalogue", icon: <BookOutlined /> },
   { href: "/daily-sync", label: "Daily Sync", icon: <UploadOutlined /> },
   { href: "/dispatch-advices", label: "Dispatch", icon: <TruckOutlined /> },
   { href: "/sync-history", label: "Sync History", icon: <SyncOutlined /> },
