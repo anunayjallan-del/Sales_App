@@ -291,11 +291,32 @@ function formatStatusLabel(status: string): string {
   return status;
 }
 
-function getLaneStatusChips(auctionStatus: string | null | undefined, privateStatus: string | null | undefined): Array<{ color: string; label: string }> {
+function getFallbackStatus(activeStatuses: string[] | null | undefined): string {
+  const statuses = (activeStatuses ?? []).map((status) => String(status)).filter(Boolean);
+  if (!statuses.length) return "PENDING";
+  if (statuses.includes("CLOSED")) return "CLOSED";
+  if (statuses.includes("CANCELLED")) return "CANCELLED";
+  return statuses[0] ?? "PENDING";
+}
+
+function getStatusChipColor(status: string): string {
+  if (status === "CANCELLED") return "red";
+  if (status === "CLOSED") return "blue";
+  return "default";
+}
+
+function getLaneStatusChips(
+  auctionStatus: string | null | undefined,
+  privateStatus: string | null | undefined,
+  activeStatuses?: string[] | null
+): Array<{ color: string; label: string }> {
   const chips: Array<{ color: string; label: string }> = [];
   if (auctionStatus) chips.push({ color: "geekblue", label: formatStatusLabel(auctionStatus) });
   if (privateStatus) chips.push({ color: "purple", label: formatStatusLabel(privateStatus) });
-  if (!chips.length) chips.push({ color: "default", label: "PENDING" });
+  if (!chips.length) {
+    const fallbackStatus = getFallbackStatus(activeStatuses);
+    chips.push({ color: getStatusChipColor(fallbackStatus), label: formatStatusLabel(fallbackStatus) });
+  }
   return chips;
 }
 
@@ -721,7 +742,7 @@ export default function DispatchPendingPage() {
       render: (_, row) => {
         const statuses = row.active_statuses?.length
           ? row.active_statuses
-          : getLaneStatusChips(row.auction_lane_status, row.private_lane_status).map((chip) => chip.label);
+          : getLaneStatusChips(row.auction_lane_status, row.private_lane_status, row.active_statuses).map((chip) => chip.label);
         const negotiatingTooltip = negotiatingTooltipText(row.negotiating_buyers, row.last_negotiated_on);
         return (
           <Space size={[4, 4]} wrap>
@@ -1191,7 +1212,11 @@ export default function DispatchPendingPage() {
               </Typography.Text>
               <br />
               <Space size={[6, 6]} wrap style={{ marginTop: 6 }}>
-                {getLaneStatusChips(manageLot?.auction_lane_status, manageLot?.private_lane_status).map((chip) => {
+                {getLaneStatusChips(
+                  manageLot?.auction_lane_status,
+                  manageLot?.private_lane_status,
+                  manageLot?.active_statuses
+                ).map((chip) => {
                   const negotiatingTooltip = negotiatingTooltipText(
                     manageLot?.negotiating_buyers,
                     manageLot?.last_negotiated_on

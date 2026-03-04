@@ -12,11 +12,32 @@ function formatStatusLabel(status: string): string {
   return status;
 }
 
-function getLaneStatusChips(auctionStatus: string | null | undefined, privateStatus: string | null | undefined): Array<{ color: string; label: string }> {
+function getFallbackStatus(activeStatuses: string[] | null | undefined): string {
+  const statuses = (activeStatuses ?? []).map((status) => String(status)).filter(Boolean);
+  if (!statuses.length) return "PENDING";
+  if (statuses.includes("CLOSED")) return "CLOSED";
+  if (statuses.includes("CANCELLED")) return "CANCELLED";
+  return statuses[0] ?? "PENDING";
+}
+
+function getStatusChipColor(status: string): string {
+  if (status === "CANCELLED") return "red";
+  if (status === "CLOSED") return "blue";
+  return "default";
+}
+
+function getLaneStatusChips(
+  auctionStatus: string | null | undefined,
+  privateStatus: string | null | undefined,
+  activeStatuses?: string[] | null
+): Array<{ color: string; label: string }> {
   const chips: Array<{ color: string; label: string }> = [];
   if (auctionStatus) chips.push({ color: "geekblue", label: formatStatusLabel(auctionStatus) });
   if (privateStatus) chips.push({ color: "purple", label: formatStatusLabel(privateStatus) });
-  if (!chips.length) chips.push({ color: "default", label: "PENDING" });
+  if (!chips.length) {
+    const fallbackStatus = getFallbackStatus(activeStatuses);
+    chips.push({ color: getStatusChipColor(fallbackStatus), label: formatStatusLabel(fallbackStatus) });
+  }
   return chips;
 }
 
@@ -84,7 +105,7 @@ export default function LotDetailPage() {
                   <Descriptions.Item label="Grade">{lot.grade}</Descriptions.Item>
                   <Descriptions.Item label="Status Lanes">
                     <Space wrap>
-                      {getLaneStatusChips(lot.auction_lane_status, lot.private_lane_status).map((chip) => {
+                      {getLaneStatusChips(lot.auction_lane_status, lot.private_lane_status, lot.active_statuses).map((chip) => {
                         const negotiatingTooltip = negotiatingTooltipText(lot.negotiating_buyers, lot.last_negotiated_on);
                         const isNegotiatingChip =
                           chip.color === "purple" &&

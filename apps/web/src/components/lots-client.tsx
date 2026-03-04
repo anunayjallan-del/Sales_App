@@ -285,11 +285,32 @@ function formatStatusLabel(status: string): string {
   return status;
 }
 
-function getLaneStatusChips(auctionStatus: string | null | undefined, privateStatus: string | null | undefined): Array<{ color: string; label: string }> {
+function getFallbackStatus(activeStatuses: string[] | null | undefined): string {
+  const statuses = (activeStatuses ?? []).map((status) => String(status)).filter(Boolean);
+  if (!statuses.length) return "PENDING";
+  if (statuses.includes("CLOSED")) return "CLOSED";
+  if (statuses.includes("CANCELLED")) return "CANCELLED";
+  return statuses[0] ?? "PENDING";
+}
+
+function getStatusChipColor(status: string): string {
+  if (status === "CANCELLED") return "red";
+  if (status === "CLOSED") return "blue";
+  return "default";
+}
+
+function getLaneStatusChips(
+  auctionStatus: string | null | undefined,
+  privateStatus: string | null | undefined,
+  activeStatuses?: string[] | null
+): Array<{ color: string; label: string }> {
   const chips: Array<{ color: string; label: string }> = [];
   if (auctionStatus) chips.push({ color: "geekblue", label: formatStatusLabel(auctionStatus) });
   if (privateStatus) chips.push({ color: "purple", label: formatStatusLabel(privateStatus) });
-  if (!chips.length) chips.push({ color: "default", label: "PENDING" });
+  if (!chips.length) {
+    const fallbackStatus = getFallbackStatus(activeStatuses);
+    chips.push({ color: getStatusChipColor(fallbackStatus), label: formatStatusLabel(fallbackStatus) });
+  }
   return chips;
 }
 
@@ -1065,7 +1086,7 @@ export function LotsClient() {
         render: (_, row) => {
           const sampled = Boolean(row.is_sampled);
           const allowedActions = sanitizeAllowedActions(row.allowed_actions);
-          const laneChips = getLaneStatusChips(row.auction_lane_status, row.private_lane_status);
+          const laneChips = getLaneStatusChips(row.auction_lane_status, row.private_lane_status, row.active_statuses);
           const negotiatingTooltip = negotiatingTooltipText(row.negotiating_buyers, row.last_negotiated_on);
           return (
             <Space size={[4, 4]} wrap>
@@ -1429,7 +1450,11 @@ export function LotsClient() {
                   {selectedLotRow ? `${selectedLotRow.mark} / ${selectedLotRow.invoice_number}` : "No lot selected"}
                 </Typography.Text>
                 <Space size={[6, 6]} wrap>
-                  {getLaneStatusChips(selectedLotRow?.auction_lane_status, selectedLotRow?.private_lane_status).map((chip) => {
+                  {getLaneStatusChips(
+                    selectedLotRow?.auction_lane_status,
+                    selectedLotRow?.private_lane_status,
+                    selectedLotRow?.active_statuses
+                  ).map((chip) => {
                     const negotiatingTooltip = negotiatingTooltipText(
                       selectedLotRow?.negotiating_buyers,
                       selectedLotRow?.last_negotiated_on
