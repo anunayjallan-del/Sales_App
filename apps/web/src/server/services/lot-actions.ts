@@ -254,7 +254,7 @@ export const actionRules: Record<LotActionName, ActionRule> = {
     schema: z.object({
       reserve_price: z.coerce.number().positive(),
       reserve_set_date: z.string().min(1),
-      point_of_contact: z.string().min(1),
+      point_of_contact: z.string().optional(),
       ...commonRemark
     })
   },

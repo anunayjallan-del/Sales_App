@@ -98,6 +98,14 @@ describe("lot-actions lane model", () => {
     expect(missingDate.success).toBe(false);
   });
 
+  it("allows reserve price action without point of contact", () => {
+    const parsed = parseActionPayload("SET_RESERVE_PRICE", {
+      reserve_price: 245,
+      reserve_set_date: "2026-03-04"
+    });
+    expect(parsed.success).toBe(true);
+  });
+
   it("accepts legacy conflict prompt types temporarily", () => {
     expect(isConflictPromptTypeCompatible("CANCEL_PRINTING_GUIDANCE", "EARLY_STAGE_GUIDANCE")).toBe(true);
     expect(isConflictPromptTypeCompatible("CANCEL_PRINTING_GUIDANCE", "MIDDLE_STAGE_1_GUIDANCE")).toBe(true);

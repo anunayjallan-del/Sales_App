@@ -267,6 +267,8 @@ export async function listLots(filters: {
   masterStatus?: string;
   status?: string;
   sampled?: boolean;
+  sortBy?: "LOT_NO" | "PACKING_DATE" | "QUANTITY";
+  sortDir?: "asc" | "desc";
   bagsMin?: number;
   bagsMax?: number;
   weightMin?: number;
@@ -278,6 +280,50 @@ export async function listLots(filters: {
 }) {
   const from = (filters.page - 1) * filters.pageSize;
   const to = from + filters.pageSize - 1;
+  const resolvedSortBy = filters.sortBy ?? "LOT_NO";
+  const resolvedSortDir = filters.sortDir === "desc" ? "desc" : "asc";
+  const ascending = resolvedSortDir === "asc";
+  const getLotNoNumericValue = (invoiceNumber: string): number | null => {
+    const matches = String(invoiceNumber ?? "").match(/\d+/g);
+    if (!matches?.length) return null;
+    const last = Number(matches[matches.length - 1]);
+    return Number.isFinite(last) ? last : null;
+  };
+  const compareLotNo = (a: { invoice_number: string }, b: { invoice_number: string }) => {
+    const aRaw = String(a.invoice_number ?? "");
+    const bRaw = String(b.invoice_number ?? "");
+    const aNum = getLotNoNumericValue(aRaw);
+    const bNum = getLotNoNumericValue(bRaw);
+    if (aNum !== null && bNum !== null && aNum !== bNum) return aNum - bNum;
+    if (aNum !== null && bNum === null) return -1;
+    if (aNum === null && bNum !== null) return 1;
+    return aRaw.localeCompare(bRaw, undefined, { sensitivity: "base" });
+  };
+  const sortLots = <T extends { id: string; invoice_number: string; date_created: string; net_weight_kg: number }>(rows: T[]) => {
+    const sorted = [...rows].sort((a, b) => {
+      let cmp = 0;
+      if (resolvedSortBy === "PACKING_DATE") {
+        cmp = String(a.date_created ?? "").localeCompare(String(b.date_created ?? ""));
+      } else if (resolvedSortBy === "QUANTITY") {
+        cmp = Number(a.net_weight_kg ?? 0) - Number(b.net_weight_kg ?? 0);
+      } else {
+        cmp = compareLotNo(a, b);
+      }
+      if (cmp === 0) cmp = compareLotNo(a, b);
+      if (cmp === 0) cmp = String(a.id).localeCompare(String(b.id));
+      return ascending ? cmp : -cmp;
+    });
+    return sorted;
+  };
+  const applyDbSort = <T extends { order: (column: string, options?: { ascending?: boolean }) => T }>(query: T): T => {
+    if (resolvedSortBy === "PACKING_DATE") {
+      return query.order("date_created", { ascending }).order("invoice_number", { ascending: true });
+    }
+    if (resolvedSortBy === "QUANTITY") {
+      return query.order("net_weight_kg", { ascending }).order("invoice_number", { ascending: true });
+    }
+    return query.order("invoice_number", { ascending }).order("date_created", { ascending: true });
+  };
 
   const searchClause = filters.search ? `invoice_number.ilike.%${filters.search}%` : null;
   const normalizeStatusFilter = (value: string) => {
@@ -302,12 +348,12 @@ export async function listLots(filters: {
         .map((s) => normalizeStatusFilter(s))
         .filter(Boolean)
     : [];
-  const needsComputedFiltering = statusFilters.length > 0 || filters.sampled !== undefined;
+  const needsComputedFiltering = statusFilters.length > 0 || filters.sampled !== undefined || resolvedSortBy === "LOT_NO";
 
   let dataQuery = db()
     .from("lots")
-    .select("*, auction_tracks(*), private_deals(*, buyers(name))")
-    .order("date_created", { ascending: true });
+    .select("*, auction_tracks(*), private_deals(*, buyers(name))");
+  dataQuery = applyDbSort(dataQuery);
 
   let countQuery = db().from("lots").select("id", { count: "exact", head: true });
 
@@ -390,8 +436,7 @@ export async function listLots(filters: {
   const buildStatusBaseQuery = () => {
     let query = db()
       .from("lots")
-      .select("*, auction_tracks(*), private_deals(*, buyers(name))")
-      .order("date_created", { ascending: true });
+      .select("*, auction_tracks(*), private_deals(*, buyers(name))");
     if (searchClause) query = query.or(searchClause);
     if (filters.grade) query = query.eq("grade", filters.grade);
     if (filters.mark) query = query.eq("mark", filters.mark);
@@ -402,7 +447,7 @@ export async function listLots(filters: {
     if (filters.weightMax !== undefined) query = query.lte("net_weight_kg", filters.weightMax);
     if (filters.packingDateFrom) query = query.gte("date_created", filters.packingDateFrom);
     if (filters.packingDateTo) query = query.lte("date_created", filters.packingDateTo);
-    return query;
+    return applyDbSort(query);
   };
 
   const chunkSize = 1000;
@@ -450,8 +495,9 @@ export async function listLots(filters: {
     const statuses = lot.active_statuses ?? [];
     return statuses.some((s) => statusFilters.includes(s));
   });
-  const paged = filtered.slice(from, to + 1);
-  return { lots: paged, total: filtered.length };
+  const sortedFiltered = sortLots(filtered);
+  const paged = sortedFiltered.slice(from, to + 1);
+  return { lots: paged, total: sortedFiltered.length };
 }
 
 export async function getLotWithRelations(lotId: string) {

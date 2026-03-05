@@ -10,6 +10,8 @@ export const lotQuerySchema = z.object({
   masterStatus: z.string().optional(),
   status: z.string().optional(),
   sampled: z.coerce.boolean().optional(),
+  sortBy: z.enum(["LOT_NO", "PACKING_DATE", "QUANTITY"]).optional(),
+  sortDir: z.enum(["asc", "desc"]).optional(),
   bagsMin: z.coerce.number().optional(),
   bagsMax: z.coerce.number().optional(),
   weightMin: z.coerce.number().optional(),
