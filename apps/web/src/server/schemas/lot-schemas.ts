@@ -5,6 +5,7 @@ import { acceptedConflictPromptTypes, actionNames } from "@/server/services/lot-
 export const lotQuerySchema = z.object({
   search: z.string().optional(),
   mark: z.string().optional(),
+  marks: z.string().optional(),
   factory: z.string().optional(),
   grade: z.string().optional(),
   masterStatus: z.string().optional(),

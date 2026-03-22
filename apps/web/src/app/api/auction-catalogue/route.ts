@@ -2,6 +2,8 @@ import { NextRequest } from "next/server";
 import { requireRole } from "@/lib/authz";
 import { badRequest, ok, serverError } from "@/lib/http";
 import { getSupabaseAdmin } from "@/lib/supabase";
+import { GlobalLotStatus } from "@/lib/types";
+import { getAllowedActionsForStatuses, splitLotStatusLanes } from "@/server/services/lot-actions";
 
 type LotRow = {
   id: string;
@@ -41,12 +43,24 @@ export async function GET(req: NextRequest) {
     const supabase = getSupabaseAdmin();
     const { data: activeRows, error: activeError } = await supabase
       .from("lot_active_statuses")
-      .select("lot_id")
+      .select("lot_id,status")
       .eq("status", status);
     if (activeError) throw activeError;
 
     const lotIds = Array.from(new Set((activeRows ?? []).map((row) => String(row.lot_id)).filter(Boolean)));
     if (!lotIds.length) return ok({ rows: [] });
+
+    const activeStatusesByLot = new Map<string, GlobalLotStatus[]>();
+    for (const row of activeRows ?? []) {
+      const lotId = String(row.lot_id);
+      const statusValue = String(row.status ?? "").trim() as GlobalLotStatus;
+      if (!statusValue) continue;
+      const statuses = activeStatusesByLot.get(lotId) ?? [];
+      statuses.push(statusValue);
+      activeStatusesByLot.set(lotId, statuses);
+    }
+
+    const sampledLotIds = new Set<string>();
 
     const lotsById = new Map<string, LotRow>();
     const chunkSize = 200;
@@ -67,6 +81,16 @@ export async function GET(req: NextRequest) {
           net_weight_kg: Number(row.net_weight_kg ?? 0),
           date_created: String(row.date_created ?? "")
         });
+      }
+
+      const { data: samplingChunk, error: samplingError } = await supabase
+        .from("lot_actions")
+        .select("lot_id")
+        .eq("action", "SAMPLING")
+        .in("lot_id", chunk);
+      if (samplingError) throw samplingError;
+      for (const row of samplingChunk ?? []) {
+        sampledLotIds.add(String(row.lot_id));
       }
     }
 
@@ -104,12 +128,28 @@ export async function GET(req: NextRequest) {
           actions.find((row) => row.action === "SET_RESERVE_PRICE") ??
           actions.find((row) => row.action === "OUT") ??
           actions.find((row) => row.action === "SOLD_AUCTION");
+        const activeStatuses = (activeStatusesByLot.get(lotId) ?? [])
+          .map((value) => String(value).trim() as GlobalLotStatus)
+          .filter((value) => Boolean(value) && value !== "SAMPLING_SENT");
+        if (!activeStatuses.length && status) {
+          activeStatuses.push(status as GlobalLotStatus);
+        }
+        if (!activeStatuses.length) {
+          activeStatuses.push("PENDING");
+        }
+        const laneStatuses = splitLotStatusLanes(activeStatuses);
+        const allowedActions = getAllowedActionsForStatuses(activeStatuses);
 
         return {
           ...lot,
           status,
           auction_centre: parseAuctionCentre(dispatch?.payload ?? null),
-          sale_no: parseSaleNo(saleAction?.payload ?? null)
+          sale_no: parseSaleNo(saleAction?.payload ?? null),
+          active_statuses: activeStatuses,
+          auction_lane_status: laneStatuses.auction,
+          private_lane_status: laneStatuses.private,
+          allowed_actions: allowedActions,
+          is_sampled: sampledLotIds.has(lotId)
         };
       })
       .filter((row): row is NonNullable<typeof row> => Boolean(row))

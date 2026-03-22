@@ -11,3 +11,6 @@ coverage
 **/.next/
 **/.next-dev/
 **/.next_stale_*/
+
+# TypeScript incremental build cache
+**/*.tsbuildinfo

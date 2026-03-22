@@ -262,6 +262,7 @@ async function getNegotiatingSnapshotByLotIds(lotIds: string[]) {
 export async function listLots(filters: {
   search?: string;
   mark?: string;
+  marks?: string;
   factory?: string;
   grade?: string;
   masterStatus?: string;
@@ -326,6 +327,15 @@ export async function listLots(filters: {
   };
 
   const searchClause = filters.search ? `invoice_number.ilike.%${filters.search}%` : null;
+  const selectedMarks = (
+    filters.marks
+      ? filters.marks.split(",")
+      : filters.mark
+        ? [filters.mark]
+        : []
+  )
+    .map((value) => String(value).trim())
+    .filter(Boolean);
   const normalizeStatusFilter = (value: string) => {
     const raw = value.trim();
     const upper = raw.toUpperCase();
@@ -365,9 +375,12 @@ export async function listLots(filters: {
     dataQuery = dataQuery.eq("grade", filters.grade);
     countQuery = countQuery.eq("grade", filters.grade);
   }
-  if (filters.mark) {
-    dataQuery = dataQuery.eq("mark", filters.mark);
-    countQuery = countQuery.eq("mark", filters.mark);
+  if (selectedMarks.length === 1) {
+    dataQuery = dataQuery.eq("mark", selectedMarks[0]);
+    countQuery = countQuery.eq("mark", selectedMarks[0]);
+  } else if (selectedMarks.length > 1) {
+    dataQuery = dataQuery.in("mark", selectedMarks);
+    countQuery = countQuery.in("mark", selectedMarks);
   }
   if (filters.factory) {
     dataQuery = dataQuery.eq("factory", filters.factory);
@@ -439,7 +452,8 @@ export async function listLots(filters: {
       .select("*, auction_tracks(*), private_deals(*, buyers(name))");
     if (searchClause) query = query.or(searchClause);
     if (filters.grade) query = query.eq("grade", filters.grade);
-    if (filters.mark) query = query.eq("mark", filters.mark);
+    if (selectedMarks.length === 1) query = query.eq("mark", selectedMarks[0]);
+    else if (selectedMarks.length > 1) query = query.in("mark", selectedMarks);
     if (filters.factory) query = query.eq("factory", filters.factory);
     if (filters.bagsMin !== undefined) query = query.gte("bags", filters.bagsMin);
     if (filters.bagsMax !== undefined) query = query.lte("bags", filters.bagsMax);

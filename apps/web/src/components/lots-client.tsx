@@ -1,11 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
 import type { ColumnsType } from "antd/es/table";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckOutlined, CloseOutlined, DownOutlined, FilterOutlined, UpOutlined } from "@ant-design/icons";
+import { CheckOutlined, CloseOutlined, FilterOutlined, ReloadOutlined } from "@ant-design/icons";
 import { App, Button, Card, Checkbox, Col, Divider, Drawer, Dropdown, Input, InputNumber, List, Modal, Popover, Row, Select, Space, Table, Tag, Tooltip, Typography } from "antd";
 import { fetchJson } from "@/lib/fetcher";
 import { handleEnterToSubmit } from "@/lib/keyboard-submit";
@@ -71,6 +71,14 @@ type ActionName =
   | "CANCELLED"
   | "REINVOICED"
   | "PAYMENT_RECEIVED";
+
+type SortOptionValue =
+  | "LOT_NO_ASC"
+  | "LOT_NO_DESC"
+  | "PACKING_DATE_ASC"
+  | "PACKING_DATE_DESC"
+  | "QUANTITY_ASC"
+  | "QUANTITY_DESC";
 
 type ActionField = { key: string; label: string; type: "text" | "date" | "number" | "tags"; required?: boolean };
 type ConflictPromptType =
@@ -213,6 +221,13 @@ const conflictPromptOrder: ConflictPromptType[] = [
   "MIDDLE_STAGE_2_GUIDANCE",
   "LATER_STAGE_GUIDANCE"
 ];
+const MARK_FILTER_SEQUENCE = [
+  { key: "FURKATING", label: "Furkating" },
+  { key: "ABHOYJAN", label: "Abhoyjan" },
+  { key: "ABHOYBARII", label: "Abhoybarii" },
+  { key: "FURKATING SELECT", label: "Furkating Select" },
+  { key: "ALL MY TEA", label: "All My Tea" }
+] as const;
 
 function sanitizeAllowedActions(actions: string[] | undefined): ActionName[] {
   if (!actions?.length) {
@@ -258,6 +273,14 @@ function getConflictPromptLabel(promptType: ConflictPromptType): string {
   if (promptType === "MIDDLE_STAGE_1_GUIDANCE") return "Middle stage 1";
   if (promptType === "MIDDLE_STAGE_2_GUIDANCE") return "Middle stage 2";
   return "Later stage";
+}
+
+function normalizeLotSearchInput(value: string): string {
+  return value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 7);
+}
+
+function normalizeMarkKey(value: string): string {
+  return String(value ?? "").trim().toUpperCase().replace(/\s+/g, " ");
 }
 
 function getConflictAckMeta(action: ActionName, auctionStatus: string | null | undefined): { promptType: ConflictPromptType; message: string } | null {
@@ -439,15 +462,18 @@ function formatPackingDate(value: string): string {
 function HeaderFilter({
   label,
   active,
-  content
+  content,
+  sortControl
 }: {
   label: string;
   active: boolean;
   content: React.ReactNode;
+  sortControl?: React.ReactNode;
 }) {
   return (
     <Space size={6}>
       <span>{label}</span>
+      {sortControl}
       <Popover trigger="click" placement="bottomLeft" content={content}>
         <Button
           size="small"
@@ -488,8 +514,10 @@ function HeaderMenuFilter({
 }
 
 export function LotsClient() {
-  const [search, setSearch] = useState("");
-  const [markFilter, setMarkFilter] = useState<string | null>(null);
+  const searchParams = useSearchParams();
+  const searchFromQuery = useMemo(() => normalizeLotSearchInput(searchParams.get("search") ?? ""), [searchParams]);
+  const [search, setSearch] = useState(searchFromQuery);
+  const [markFilters, setMarkFilters] = useState<string[]>([]);
   const [factoryFilter, setFactoryFilter] = useState<string | null>(null);
   const [gradeFilter, setGradeFilter] = useState("");
   const [bagsMin, setBagsMin] = useState<number | null>(null);
@@ -499,7 +527,6 @@ export function LotsClient() {
   const [packingDateFrom, setPackingDateFrom] = useState("");
   const [packingDateTo, setPackingDateTo] = useState("");
   const [statusFilter, setStatusFilter] = useState<string[]>([]);
-  const [sampledFilter, setSampledFilter] = useState<"ALL" | "YES" | "NO">("ALL");
   const [sortBy, setSortBy] = useState<"LOT_NO" | "PACKING_DATE" | "QUANTITY">("LOT_NO");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const [page, setPage] = useState(1);
@@ -525,6 +552,11 @@ export function LotsClient() {
   const pageSize = 20;
   const selectedLotId = selected.length === 1 ? selected[0] : null;
 
+  useEffect(() => {
+    setSearch(searchFromQuery);
+    setPage(1);
+  }, [searchFromQuery]);
+
   const { data: filterOptions } = useQuery({
     queryKey: ["lot-filter-options"],
     queryFn: () => fetchJson<{ marks: string[]; factories: string[]; grades: string[] }>("/api/lots/filter-options")
@@ -533,13 +565,27 @@ export function LotsClient() {
     queryKey: ["party-options"],
     queryFn: () => fetchJson<{ buyers: string[]; brokers: string[] }>("/api/parties/options")
   });
+  const orderedMarkRows = useMemo(() => {
+    const availableMarksByKey = new Map<string, string>();
+    for (const mark of filterOptions?.marks ?? []) {
+      const key = normalizeMarkKey(mark);
+      if (!availableMarksByKey.has(key)) {
+        availableMarksByKey.set(key, mark);
+      }
+    }
+    const ordered = MARK_FILTER_SEQUENCE.map((item) => ({
+      value: availableMarksByKey.get(item.key) ?? item.key,
+      label: item.label
+    }));
+    return [ordered.slice(0, 3), ordered.slice(3)];
+  }, [filterOptions?.marks]);
 
   const lotsQuery = useMemo(() => {
     const params = new URLSearchParams();
     params.set("page", String(page));
     params.set("pageSize", String(pageSize));
     if (search.trim()) params.set("search", search.trim());
-    if (markFilter) params.set("mark", markFilter);
+    if (markFilters.length) params.set("marks", markFilters.join(","));
     if (factoryFilter) params.set("factory", factoryFilter);
     if (gradeFilter.trim()) params.set("grade", gradeFilter.trim());
     if (bagsMin !== null) params.set("bagsMin", String(bagsMin));
@@ -548,9 +594,10 @@ export function LotsClient() {
     if (weightMax !== null) params.set("weightMax", String(weightMax));
     if (packingDateFrom) params.set("packingDateFrom", packingDateFrom);
     if (packingDateTo) params.set("packingDateTo", packingDateTo);
-    if (statusFilter.length) params.set("status", statusFilter.join(","));
-    if (sampledFilter === "YES") params.set("sampled", "true");
-    if (sampledFilter === "NO") params.set("sampled", "false");
+    const sampledSelected = statusFilter.includes("SAMPLED");
+    const lifecycleStatuses = statusFilter.filter((status) => status !== "SAMPLED");
+    if (lifecycleStatuses.length) params.set("status", lifecycleStatuses.join(","));
+    if (sampledSelected) params.set("sampled", "true");
     params.set("sortBy", sortBy);
     params.set("sortDir", sortDirection);
     return params.toString();
@@ -559,14 +606,13 @@ export function LotsClient() {
     bagsMin,
     factoryFilter,
     gradeFilter,
-    markFilter,
+    markFilters,
     packingDateFrom,
     packingDateTo,
     page,
     pageSize,
     search,
     statusFilter,
-    sampledFilter,
     sortBy,
     sortDirection,
     weightMax,
@@ -675,6 +721,7 @@ export function LotsClient() {
   const rows = data?.lots ?? [];
   const totalLots = data?.total ?? 0;
   const selectedRows = rows.filter((row) => selected.includes(row.id));
+  const hasBulkSelection = selected.length >= 2;
   const bulkLaneAlignment = useMemo(() => {
     if (selectedRows.length < 2) {
       return { isAligned: false, lane: null as "auction" | "private" | "non_lane" | null, status: null as string | null };
@@ -889,6 +936,7 @@ export function LotsClient() {
   const statusItems = useMemo(() => {
     const selected = new Set(statusFilter);
     const statuses = [
+      { key: "SAMPLED", label: "SAMPLED" },
       { key: "PENDING", label: "PENDING" },
       { key: "PENDING_AUCTION_DISPATCH", label: "PENDING_AUCTION_DISPATCH" },
       { key: "IN_TRANSIT", label: "IN_TRANSIT" },
@@ -958,6 +1006,47 @@ export function LotsClient() {
     if (!bulkActionOptions.length) return "No common actions for selected lots.";
     return "";
   }, [bulkActionOptions.length, bulkLaneAlignment.isAligned]);
+  const sortOptionValue: SortOptionValue = useMemo(() => {
+    if (sortBy === "LOT_NO" && sortDirection === "asc") return "LOT_NO_ASC";
+    if (sortBy === "LOT_NO" && sortDirection === "desc") return "LOT_NO_DESC";
+    if (sortBy === "PACKING_DATE" && sortDirection === "asc") return "PACKING_DATE_ASC";
+    if (sortBy === "PACKING_DATE" && sortDirection === "desc") return "PACKING_DATE_DESC";
+    if (sortBy === "QUANTITY" && sortDirection === "asc") return "QUANTITY_ASC";
+    return "QUANTITY_DESC";
+  }, [sortBy, sortDirection]);
+  const sortOptions: Array<{ value: SortOptionValue; label: string }> = useMemo(
+    () => [
+      { value: "LOT_NO_ASC", label: "Lot No. (Ascending)" },
+      { value: "LOT_NO_DESC", label: "Lot No. (Descending)" },
+      { value: "PACKING_DATE_ASC", label: "Packing Date (Oldest first)" },
+      { value: "PACKING_DATE_DESC", label: "Packing Date (Newest first)" },
+      { value: "QUANTITY_ASC", label: "Qty (Low to high)" },
+      { value: "QUANTITY_DESC", label: "Qty (High to low)" }
+    ],
+    []
+  );
+  const applySortOption = (value: SortOptionValue) => {
+    if (value === "LOT_NO_ASC") {
+      setSortBy("LOT_NO");
+      setSortDirection("asc");
+    } else if (value === "LOT_NO_DESC") {
+      setSortBy("LOT_NO");
+      setSortDirection("desc");
+    } else if (value === "PACKING_DATE_ASC") {
+      setSortBy("PACKING_DATE");
+      setSortDirection("asc");
+    } else if (value === "PACKING_DATE_DESC") {
+      setSortBy("PACKING_DATE");
+      setSortDirection("desc");
+    } else if (value === "QUANTITY_ASC") {
+      setSortBy("QUANTITY");
+      setSortDirection("asc");
+    } else {
+      setSortBy("QUANTITY");
+      setSortDirection("desc");
+    }
+    setPage(1);
+  };
   const samplingPartyOptions = useMemo(
     () => uniqueNameOptions([...(partyOptions?.buyers ?? []), ...(partyOptions?.brokers ?? [])]),
     [partyOptions?.buyers, partyOptions?.brokers]
@@ -1010,21 +1099,46 @@ export function LotsClient() {
         title: "Factory",
         dataIndex: "factory",
         key: "factory",
-        render: (value: string | null) => value || "-"
+        width: 130,
+        render: (value: string | null) => <span style={{ whiteSpace: "nowrap" }}>{value || "-"}</span>
       },
       {
         title: "Mark",
         dataIndex: "mark",
-        key: "mark"
+        key: "mark",
+        width: 160,
+        render: (value: string) => <span style={{ whiteSpace: "nowrap" }}>{value}</span>
       },
       {
-        title: "Lot No.",
+        title: (
+          <HeaderFilter
+            label="Lot No."
+            active={Boolean(search.trim())}
+            content={
+              <Input
+                size="small"
+                allowClear
+                placeholder="Search by Lot No."
+                value={search}
+                maxLength={7}
+                onChange={(e) => {
+                  const compact = normalizeLotSearchInput(e.target.value);
+                  setSearch(compact);
+                  setPage(1);
+                }}
+              />
+            }
+          />
+        ),
         dataIndex: "invoice_number",
-        key: "invoice_number"
+        key: "invoice_number",
+        width: 130,
+        render: (value: string) => <span style={{ whiteSpace: "nowrap" }}>{value}</span>
       },
       {
         dataIndex: "grade",
         key: "grade",
+        width: 120,
         title: (
           <HeaderMenuFilter
             label="Grade"
@@ -1071,13 +1185,13 @@ export function LotsClient() {
         ),
         dataIndex: "bags",
         key: "bags",
-        width: 90,
+        width: 85,
         responsive: ["md"]
       },
       {
         title: (
           <HeaderFilter
-            label="Quantity"
+            label="Qty"
             active={weightMin !== null || weightMax !== null}
             content={
               <Space.Compact size="small">
@@ -1107,7 +1221,7 @@ export function LotsClient() {
         ),
         dataIndex: "net_weight_kg",
         key: "net_weight_kg",
-        width: 110,
+        width: 84,
         responsive: ["md"]
       },
       {
@@ -1141,7 +1255,7 @@ export function LotsClient() {
         ),
         dataIndex: "date_created",
         key: "date_created",
-        width: 120,
+        width: 110,
         render: (value: string) => formatPackingDate(value),
         responsive: ["md"]
       },
@@ -1212,89 +1326,9 @@ export function LotsClient() {
         }
       },
       {
-        title: (() => {
-          const hasBulkSelection = selected.length >= 2;
-          return (
-            <div
-              style={{
-                width: "100%",
-                minHeight: 52,
-                position: "relative"
-              }}
-            >
-              <Space
-                size={8}
-                align="center"
-                style={{
-                  position: "absolute",
-                  left: "50%",
-                  top: "45%",
-                  transform: "translate(-50%, -50%)",
-                  visibility: hasBulkSelection ? "visible" : "hidden",
-                  pointerEvents: hasBulkSelection ? "auto" : "none"
-                }}
-              >
-                <Button
-                  type="primary"
-                  size="small"
-                  disabled={!hasBulkSelection || !bulkLaneAlignment.isAligned || !bulkActionOptions.length}
-                  title={bulkManageDisabledReason || undefined}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    if (!hasBulkSelection) return;
-                    setBulkActionStep1Choice(undefined);
-                    setBulkActionSelectOpen(true);
-                    setBulkActionDetailsOpen(false);
-                  }}
-                >
-                  Manage lots
-                </Button>
-                <Button
-                  type="default"
-                  size="small"
-                  danger
-                  shape="circle"
-                  icon={<CloseOutlined style={{ fontSize: 10 }} />}
-                  style={{
-                    borderColor: "#ff7875",
-                    color: "#ff4d4f",
-                    background: "#fff",
-                    width: 22,
-                    minWidth: 22,
-                    height: 22,
-                    paddingInline: 0
-                  }}
-                  aria-label="Clear selection"
-                  title="Clear selection"
-                  disabled={!hasBulkSelection}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    if (!hasBulkSelection) return;
-                    setSelected([]);
-                  }}
-                />
-              </Space>
-              <Typography.Text
-                type={bulkLaneAlignment.isAligned ? "secondary" : "danger"}
-                style={{
-                  position: "absolute",
-                  right: 0,
-                  bottom: -2,
-                  fontSize: 11,
-                  lineHeight: 1.1,
-                  whiteSpace: "nowrap",
-                  visibility: hasBulkSelection ? "visible" : "hidden"
-                }}
-              >
-                {bulkLaneAlignment.isAligned ? `${selected.length} lots` : "Conflict"}
-              </Typography.Text>
-            </div>
-          );
-        })(),
+        title: "Action",
         key: "open",
-        width: 320,
+        width: 280,
         render: (_, row) => {
           const allowedActions = sanitizeAllowedActions(row.allowed_actions);
           const firstAction = allowedActions[0];
@@ -1345,16 +1379,15 @@ export function LotsClient() {
     [
       bagsMax,
       bagsMin,
-      bulkActionOptions.length,
-      bulkLaneAlignment.isAligned,
-      bulkManageDisabledReason,
       deleteLot,
       gradeFilter,
       gradeItems,
       modal,
       packingDateFrom,
       packingDateTo,
-      selected.length,
+      search,
+      sortBy,
+      sortDirection,
       statusFilter,
       statusItems,
       weightMax,
@@ -1364,173 +1397,205 @@ export function LotsClient() {
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-      <Card title="Filters" variant="borderless">
-        <Row gutter={[12, 12]}>
-          <Col xs={24} md={4}>
-            <Space direction="vertical" size={4}>
-              <Typography.Text type="secondary">Lot Number</Typography.Text>
-              <Input
-                size="middle"
-                placeholder="UKD9999"
-                value={search}
-                maxLength={7}
-                style={{ width: 140 }}
-                onChange={(e) => {
-                  const compact = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 7);
-                  setSearch(compact);
-                  setPage(1);
-                }}
-              />
-            </Space>
+      <Card variant="borderless" styles={{ body: { padding: 16 } }}>
+        <Row gutter={[16, 12]} align="stretch">
+          <Col xs={24} lg={16}>
+            <div
+              style={{
+                border: "1px solid #e7ece3",
+                borderRadius: 12,
+                background: "#fcfdfb",
+                padding: 12,
+                minHeight: 140
+              }}
+            >
+              <Row gutter={[20, 8]} align="top">
+                <Col xs={24} md={14}>
+                  <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                    <Typography.Text type="secondary" style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3 }}>
+                      Mark
+                    </Typography.Text>
+                    <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                      {orderedMarkRows.map((row, rowIndex) => (
+                        <div
+                          key={`mark-row-${rowIndex}`}
+                          style={{
+                            display: "flex",
+                            gap: 8,
+                            flexWrap: "nowrap",
+                            overflowX: "auto",
+                            paddingBottom: 2
+                          }}
+                        >
+                          {row.map((option) => (
+                            <Button
+                              key={`${option.value}-${option.label}`}
+                              size="small"
+                              shape="round"
+                              type={markFilters.includes(option.value) ? "primary" : "default"}
+                              style={
+                                markFilters.includes(option.value)
+                                  ? { whiteSpace: "nowrap" }
+                                  : { borderColor: "#d9d9d9", whiteSpace: "nowrap" }
+                              }
+                              onClick={() => {
+                                setMarkFilters((prev) =>
+                                  prev.includes(option.value) ? prev.filter((item) => item !== option.value) : [...prev, option.value]
+                                );
+                                setPage(1);
+                              }}
+                            >
+                              {option.label}
+                            </Button>
+                          ))}
+                        </div>
+                      ))}
+                    </Space>
+                  </Space>
+                </Col>
+                <Col xs={24} md={10}>
+                  <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                    <Typography.Text type="secondary" style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3 }}>
+                      Factory
+                    </Typography.Text>
+                    <Space wrap size={[8, 8]}>
+                      {(filterOptions?.factories ?? []).map((factory) => (
+                        <Button
+                          key={factory}
+                          size="small"
+                          shape="round"
+                          type={factoryFilter === factory ? "primary" : "default"}
+                          style={factoryFilter === factory ? undefined : { borderColor: "#d9d9d9" }}
+                          onClick={() => {
+                            setFactoryFilter(factoryFilter === factory ? null : factory);
+                            setPage(1);
+                          }}
+                        >
+                          {factory}
+                        </Button>
+                      ))}
+                    </Space>
+                  </Space>
+                </Col>
+              </Row>
+            </div>
           </Col>
-          <Col xs={24} md={8}>
-            <Space direction="vertical" size={6} style={{ width: "100%" }}>
-              <Typography.Text type="secondary">Mark</Typography.Text>
-              <Space wrap size={[8, 8]}>
-                <Button
-                  size="small"
-                  shape="round"
-                  type={markFilter === null ? "primary" : "default"}
-                  onClick={() => {
-                    setMarkFilter(null);
-                    setPage(1);
-                  }}
-                >
-                  All
-                </Button>
-                {(filterOptions?.marks ?? []).map((mark) => (
-                  <Button
-                    key={mark}
-                    size="small"
-                    shape="round"
-                    type={markFilter === mark ? "primary" : "default"}
-                    style={markFilter === mark ? undefined : { borderColor: "#d9d9d9" }}
-                    onClick={() => {
-                      setMarkFilter(markFilter === mark ? null : mark);
-                      setPage(1);
-                    }}
-                  >
-                    {mark}
-                  </Button>
-                ))}
-              </Space>
-            </Space>
-          </Col>
-          <Col xs={24} md={4}>
-            <Space direction="vertical" size={6} style={{ width: "100%" }}>
-              <Typography.Text type="secondary">Factory</Typography.Text>
-              <Space wrap size={[8, 8]}>
-                <Button
-                  size="small"
-                  shape="round"
-                  type={factoryFilter === null ? "primary" : "default"}
-                  onClick={() => {
-                    setFactoryFilter(null);
-                    setPage(1);
-                  }}
-                >
-                  All
-                </Button>
-                {(filterOptions?.factories ?? []).map((factory) => (
-                  <Button
-                    key={factory}
-                    size="small"
-                    shape="round"
-                    type={factoryFilter === factory ? "primary" : "default"}
-                    style={factoryFilter === factory ? undefined : { borderColor: "#d9d9d9" }}
-                    onClick={() => {
-                      setFactoryFilter(factoryFilter === factory ? null : factory);
-                      setPage(1);
-                    }}
-                  >
-                    {factory}
-                  </Button>
-                ))}
-              </Space>
-            </Space>
-          </Col>
-          <Col xs={24} md={3}>
-            <Space direction="vertical" size={6} style={{ width: "100%" }}>
-              <Typography.Text type="secondary">Sampled</Typography.Text>
-              <Space wrap size={[8, 8]}>
-                <Button
-                  size="small"
-                  shape="round"
-                  type={sampledFilter === "ALL" ? "primary" : "default"}
-                  onClick={() => {
-                    setSampledFilter("ALL");
-                    setPage(1);
-                  }}
-                >
-                  All
-                </Button>
-                <Button
-                  size="small"
-                  shape="round"
-                  type={sampledFilter === "YES" ? "primary" : "default"}
-                  onClick={() => {
-                    setSampledFilter("YES");
-                    setPage(1);
-                  }}
-                >
-                  Yes
-                </Button>
-                <Button
-                  size="small"
-                  shape="round"
-                  type={sampledFilter === "NO" ? "primary" : "default"}
-                  onClick={() => {
-                    setSampledFilter("NO");
-                    setPage(1);
-                  }}
-                >
-                  No
-                </Button>
-              </Space>
-            </Space>
-          </Col>
-          <Col xs={24} md={5}>
-            <Space direction="vertical" size={6} style={{ width: "100%" }}>
-              <Typography.Text type="secondary">Sort by</Typography.Text>
-              <Space size={8} wrap>
+          <Col xs={24} lg={8}>
+            <div
+              style={{
+                border: "1px solid #e7ece3",
+                borderRadius: 12,
+                background: "#fcfdfb",
+                padding: 12,
+                minHeight: 140,
+                display: "flex",
+                flexDirection: "column",
+                gap: 12
+              }}
+            >
+              <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                <Typography.Text type="secondary" style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3 }}>
+                  Sort By
+                </Typography.Text>
                 <Select
                   size="small"
-                  style={{ minWidth: 150 }}
-                  value={sortBy}
-                  options={[
-                    { label: "Lot No.", value: "LOT_NO" },
-                    { label: "Packing Date", value: "PACKING_DATE" },
-                    { label: "Quantity", value: "QUANTITY" }
-                  ]}
-                  onChange={(value) => {
-                    setSortBy(value);
+                  value={sortOptionValue}
+                  options={sortOptions}
+                  onChange={(value) => applySortOption(value as SortOptionValue)}
+                  style={{ width: 170 }}
+                  dropdownMatchSelectWidth={false}
+                />
+                <Button
+                  size="small"
+                  type="default"
+                  icon={<ReloadOutlined />}
+                  style={{
+                    borderColor: "#b8c3b0",
+                    color: "#384237",
+                    fontWeight: 700,
+                    borderRadius: 10,
+                    background: "#f6faf3",
+                    height: 30,
+                    paddingInline: 10,
+                    alignSelf: "flex-start",
+                    fontSize: 12
+                  }}
+                  onClick={() => {
+                    setSearch("");
+                    setMarkFilters([]);
+                    setFactoryFilter(null);
+                    setGradeFilter("");
+                    setBagsMin(null);
+                    setBagsMax(null);
+                    setWeightMin(null);
+                    setWeightMax(null);
+                    setPackingDateFrom("");
+                    setPackingDateTo("");
+                    setStatusFilter([]);
+                    setSortBy("LOT_NO");
+                    setSortDirection("asc");
                     setPage(1);
                   }}
-                />
-                <Space.Compact size="small">
-                  <Button
-                    size="small"
-                    type={sortDirection === "asc" ? "primary" : "default"}
-                    icon={<UpOutlined />}
-                    onClick={() => {
-                      setSortDirection("asc");
-                      setPage(1);
-                    }}
-                    aria-label="Sort ascending"
-                  />
-                  <Button
-                    size="small"
-                    type={sortDirection === "desc" ? "primary" : "default"}
-                    icon={<DownOutlined />}
-                    onClick={() => {
-                      setSortDirection("desc");
-                      setPage(1);
-                    }}
-                    aria-label="Sort descending"
-                  />
-                </Space.Compact>
+                >
+                  Clear Filters & Sort
+                </Button>
               </Space>
-            </Space>
+              {hasBulkSelection ? (
+                <div
+                  style={{
+                    border: !bulkLaneAlignment.isAligned ? "1px solid #ffd6d6" : "1px solid #e7ece3",
+                    borderRadius: 10,
+                    background: !bulkLaneAlignment.isAligned ? "#fff7f7" : "#ffffff",
+                    padding: 10
+                  }}
+                >
+                  <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                    <Space size={10} align="center">
+                      <Button
+                        type="primary"
+                        size="small"
+                        disabled={!bulkLaneAlignment.isAligned || !bulkActionOptions.length}
+                        title={bulkManageDisabledReason || undefined}
+                        onClick={() => {
+                          setBulkActionStep1Choice(undefined);
+                          setBulkActionSelectOpen(true);
+                          setBulkActionDetailsOpen(false);
+                        }}
+                      >
+                        Manage lots
+                      </Button>
+                      <Button
+                        type="default"
+                        size="small"
+                        danger
+                        shape="circle"
+                        icon={<CloseOutlined style={{ fontSize: 10 }} />}
+                        style={{
+                          borderColor: "#ff7875",
+                          color: "#ff4d4f",
+                          background: "#fff",
+                          width: 22,
+                          minWidth: 22,
+                          height: 22,
+                          paddingInline: 0
+                        }}
+                        aria-label="Clear selection"
+                        title="Clear selection"
+                        onClick={() => setSelected([])}
+                      />
+                    </Space>
+                    <Typography.Text
+                      type={!bulkLaneAlignment.isAligned ? "danger" : "secondary"}
+                      style={{ fontSize: 12, fontWeight: 600 }}
+                    >
+                      {bulkLaneAlignment.isAligned ? `${selected.length} lots` : "Check Status"}
+                    </Typography.Text>
+                  </Space>
+                </div>
+              ) : (
+                <div style={{ flex: 1 }} />
+              )}
+            </div>
           </Col>
         </Row>
       </Card>
@@ -1561,7 +1626,7 @@ export function LotsClient() {
             }
           })}
           rowClassName={() => "clickable-lot-row"}
-          scroll={{ x: 700 }}
+          scroll={{ x: 1020 }}
         />
       </Card>
 

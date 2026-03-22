@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { CloseOutlined } from "@ant-design/icons";
 import { App, Button, Card, Checkbox, Col, Drawer, Empty, Input, InputNumber, Modal, Popconfirm, Row, Segmented, Select, Space, Spin, Table, Tag, Tooltip, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { AppShell } from "@/components/app-shell";
@@ -621,6 +622,7 @@ export default function DispatchPendingPage() {
   const rows = useMemo(() => data?.lots ?? [], [data?.lots]);
   const total = data?.total ?? 0;
   const selectedRows = rows.filter((row) => selectedLotIds.includes(row.id));
+  const hasBulkSelection = selectedLotIds.length >= 2;
   const bulkLaneAlignment = useMemo(() => {
     if (selectedRows.length < 2) {
       return { isAligned: false, lane: null as "auction" | "private" | "non_lane" | null, status: null as string | null };
@@ -1105,6 +1107,60 @@ export default function DispatchPendingPage() {
           <Typography.Title level={4} style={{ margin: 0 }}>
             {view === "AUCTION_DISPATCH" ? "Auction" : "Private"}
           </Typography.Title>
+          {hasBulkSelection ? (
+            <div style={{ display: "flex", justifyContent: "flex-end", width: "100%" }}>
+              <Space direction="vertical" size={4} style={{ alignItems: "flex-end" }}>
+                <Space size={8} align="center">
+                  {view === "AUCTION_DISPATCH" ? (
+                    <Button
+                      size="small"
+                      onClick={() => {
+                        setBulkDispatchModalOpen(true);
+                        setBulkDispatchForm({ dispatch_date: new Date().toISOString().slice(0, 10), transporter: "", remarks: "" });
+                      }}
+                    >
+                      Dispatch
+                    </Button>
+                  ) : null}
+                  <Button
+                    type="primary"
+                    size="small"
+                    disabled={!bulkLaneAlignment.isAligned || !bulkActionOptions.length}
+                    title={bulkManageDisabledReason || undefined}
+                    onClick={() => {
+                      setBulkActionStep1Choice(undefined);
+                      setBulkActionSelectOpen(true);
+                      setBulkActionDetailsOpen(false);
+                    }}
+                  >
+                    Manage lots
+                  </Button>
+                  <Button
+                    type="default"
+                    size="small"
+                    danger
+                    shape="circle"
+                    icon={<CloseOutlined style={{ fontSize: 10 }} />}
+                    style={{
+                      borderColor: "#ff7875",
+                      color: "#ff4d4f",
+                      background: "#fff",
+                      width: 22,
+                      minWidth: 22,
+                      height: 22,
+                      paddingInline: 0
+                    }}
+                    aria-label="Clear selection"
+                    title="Clear selection"
+                    onClick={() => setSelectedLotIds([])}
+                  />
+                </Space>
+                <Typography.Text type={bulkLaneAlignment.isAligned ? "secondary" : "danger"} style={{ fontSize: 11, lineHeight: 1.1 }}>
+                  {bulkLaneAlignment.isAligned ? `${selectedLotIds.length} lots` : "Conflict"}
+                </Typography.Text>
+              </Space>
+            </div>
+          ) : null}
 
           {isLoading ? <Spin /> : null}
           {!isLoading && isGroupingContextLoading ? <Spin /> : null}
@@ -1137,8 +1193,22 @@ export default function DispatchPendingPage() {
                           columns={lotColumns}
                           dataSource={markGroup.lots}
                           rowSelection={{
-                            selectedRowKeys: selectedLotIds,
-                            onChange: (keys) => setSelectedLotIds(keys as string[])
+                            selectedRowKeys: markGroup.lots
+                              .map((row) => row.id)
+                              .filter((id) => selectedLotIds.includes(id)),
+                            onSelect: (record, selected) => {
+                              setSelectedLotIds((prev) => {
+                                if (selected) return Array.from(new Set([...prev, String(record.id)]));
+                                return prev.filter((id) => id !== String(record.id));
+                              });
+                            },
+                            onSelectAll: (selected, _selectedRows, changeRows) => {
+                              const changedIds = changeRows.map((row) => String(row.id));
+                              setSelectedLotIds((prev) => {
+                                if (selected) return Array.from(new Set([...prev, ...changedIds]));
+                                return prev.filter((id) => !changedIds.includes(id));
+                              });
+                            }
                           }}
                           onRow={(record) => ({
                             onClick: (event) => {
@@ -1188,71 +1258,6 @@ export default function DispatchPendingPage() {
           ) : null}
         </Space>
       </Card>
-
-      {selectedLotIds.length > 0 ? (
-        <div
-          style={{
-            position: "fixed",
-            left: "50%",
-            bottom: 16,
-            transform: "translateX(-50%)",
-            zIndex: 45,
-            width: "min(900px, calc(100vw - 24px))"
-          }}
-        >
-          <Card
-            variant="borderless"
-            style={{ boxShadow: "0 12px 36px rgba(0,0,0,0.18)", border: "1px solid #d9e4d3", background: "#f8fbf5" }}
-          >
-            <Space direction="vertical" size={10} style={{ width: "100%" }}>
-              <Space align="center" style={{ width: "100%", justifyContent: "space-between" }} wrap>
-                <Space size={8} wrap>
-                  <Tag color="green">Selected</Tag>
-                  <Typography.Text strong>{selectedLotIds.length} lots</Typography.Text>
-                </Space>
-                {bulkLaneAlignment.isAligned ? (
-                  <Typography.Text type="secondary">
-                    Lane:{" "}
-                    {bulkLaneAlignment.lane === "auction" ? "Auction" : bulkLaneAlignment.lane === "private" ? "Private" : "Non-lane"} | Status:{" "}
-                    {formatStatusLabel(String(bulkLaneAlignment.status ?? "-"))}
-                  </Typography.Text>
-                ) : (
-                  <Typography.Text type="warning">
-                    Select lots with the same status in Auction lane, Private lane, or non-lane status.
-                  </Typography.Text>
-                )}
-              </Space>
-              <Space wrap size={[8, 8]}>
-                {view === "AUCTION_DISPATCH" ? (
-                  <Button
-                    onClick={() => {
-                      setBulkDispatchModalOpen(true);
-                      setBulkDispatchForm({ dispatch_date: new Date().toISOString().slice(0, 10), transporter: "", remarks: "" });
-                    }}
-                  >
-                    Dispatch
-                  </Button>
-                ) : null}
-                {bulkLaneAlignment.isAligned ? (
-                  <Button
-                    type="primary"
-                    disabled={!bulkActionOptions.length}
-                    title={bulkManageDisabledReason || undefined}
-                    onClick={() => {
-                      setBulkActionStep1Choice(undefined);
-                      setBulkActionSelectOpen(true);
-                      setBulkActionDetailsOpen(false);
-                    }}
-                  >
-                    Manage Lot
-                  </Button>
-                ) : null}
-                <Button onClick={() => setSelectedLotIds([])}>Clear Selection</Button>
-              </Space>
-            </Space>
-          </Card>
-        </div>
-      ) : null}
 
       <Drawer
         title={actionDetailsOpen ? "Manage Lot • Step 2 of 2" : "Manage Lot • Step 1 of 2"}
