@@ -59,7 +59,6 @@ type ActionName =
   | "AUCTION_DISPATCHED"
   | "HOLD_AWR"
   | "AWR_RECEIVED"
-  | "PRINT"
   | "SET_RESERVE_PRICE"
   | "SOLD_AUCTION"
   | "OUT"
@@ -113,10 +112,6 @@ const actionFieldConfig: Record<ActionName, ActionField[]> = {
   ],
   AWR_RECEIVED: [
     { key: "arrival_date", label: "Date of Arrival", type: "date", required: true },
-    { key: "remarks", label: "Remarks", type: "text" }
-  ],
-  PRINT: [
-    { key: "print_date", label: "Print date", type: "date", required: true },
     { key: "sale_no", label: "Sale no", type: "text", required: true },
     { key: "remarks", label: "Remarks", type: "text" }
   ],
@@ -201,7 +196,6 @@ const auctionActiveForPrivateConflict = new Set<string>([
   "PENDING_AUCTION_DISPATCH",
   "IN_TRANSIT",
   "AWR_PENDING",
-  "AWR_RECEIVED",
   "CATALOGUED",
   "RESERVE_SET",
   "OUT",
@@ -232,12 +226,18 @@ function ensureSamplingForNonTerminalLot(actions: ActionName[], row: PendingLotR
   return ["SAMPLING", ...actions];
 }
 
-function resolveConflictPromptType(auctionStatus: string | null | undefined): ConflictPromptType | null {
+function normalizeAuctionStatusForConflict(auctionStatus: string | null | undefined): string | null {
   if (!auctionStatus) return null;
-  if (auctionStatusesEarlyStage.has(auctionStatus)) return "EARLY_STAGE_GUIDANCE";
-  if (auctionStatusesMiddleStage1.has(auctionStatus)) return "MIDDLE_STAGE_1_GUIDANCE";
-  if (auctionStatusesMiddleStage2.has(auctionStatus)) return "MIDDLE_STAGE_2_GUIDANCE";
-  if (auctionStatusesLaterStage.has(auctionStatus)) return "LATER_STAGE_GUIDANCE";
+  return auctionStatus === "AWR_RECEIVED" ? "CATALOGUED" : auctionStatus;
+}
+
+function resolveConflictPromptType(auctionStatus: string | null | undefined): ConflictPromptType | null {
+  const normalized = normalizeAuctionStatusForConflict(auctionStatus);
+  if (!normalized) return null;
+  if (auctionStatusesEarlyStage.has(normalized)) return "EARLY_STAGE_GUIDANCE";
+  if (auctionStatusesMiddleStage1.has(normalized)) return "MIDDLE_STAGE_1_GUIDANCE";
+  if (auctionStatusesMiddleStage2.has(normalized)) return "MIDDLE_STAGE_2_GUIDANCE";
+  if (auctionStatusesLaterStage.has(normalized)) return "LATER_STAGE_GUIDANCE";
   return null;
 }
 
@@ -263,8 +263,9 @@ function getConflictPromptLabel(promptType: ConflictPromptType): string {
 
 function getConflictAckMeta(action: ActionName, auctionStatus: string | null | undefined): { promptType: ConflictPromptType; message: string } | null {
   if (!privateCommitmentActions.has(action)) return null;
-  if (!auctionStatus || !auctionActiveForPrivateConflict.has(auctionStatus)) return null;
-  const promptType = resolveConflictPromptType(auctionStatus);
+  const normalized = normalizeAuctionStatusForConflict(auctionStatus);
+  if (!normalized || !auctionActiveForPrivateConflict.has(normalized)) return null;
+  const promptType = resolveConflictPromptType(normalized);
   if (!promptType) return null;
   return {
     promptType,
@@ -288,6 +289,7 @@ function formatActionName(action: string): string {
 }
 
 function formatStatusLabel(status: string): string {
+  if (status === "AWR_RECEIVED") return "CATALOGUED";
   if (status === "PENDING_AUCTION_DISPATCH") return "PENDING AUCTION DISPATCH";
   if (status === "WITHDRAW") return "WITHDRAWN";
   return status;
@@ -326,7 +328,6 @@ const laneStatusSet = new Set<string>([
   "PENDING_AUCTION_DISPATCH",
   "IN_TRANSIT",
   "AWR_PENDING",
-  "AWR_RECEIVED",
   "CATALOGUED",
   "RESERVE_SET",
   "SOLD_AUCTION",

@@ -8,7 +8,7 @@ import {
 } from "@/lib/types";
 import { deriveActiveStatuses, deriveWarnings, rankAuctionStatusForBadge, rankPrivateStatusForBadge } from "@/server/services/flat-status-engine";
 import { resolveLifecycleStatus } from "@/server/services/status-engine";
-import { getAllowedActionsForStatuses, splitLotStatusLanes } from "@/server/services/lot-actions";
+import { canonicalizeLotStatuses, getAllowedActionsForStatuses, splitLotStatusLanes } from "@/server/services/lot-actions";
 
 const db = () => getSupabaseAdmin();
 
@@ -70,9 +70,10 @@ function withFlatStatuses<T extends LotWithRelations>(lot: T, activeStatusesFrom
     hasAuctionPayment: Boolean(lot.auction_tracks?.[0]?.payment_received_date),
     hasPrivatePayment
   });
-  const persisted = activeStatusesFromTable?.length ? activeStatusesFromTable : fallback;
+  const persisted = activeStatusesFromTable?.length ? canonicalizeLotStatuses(activeStatusesFromTable) : canonicalizeLotStatuses(fallback);
+  const canonicalFallback = canonicalizeLotStatuses(fallback);
   const withoutSamplingSent = persisted.filter((status) => status !== "SAMPLING_SENT");
-  const fallbackWithoutSamplingSent = fallback.filter((status) => status !== "SAMPLING_SENT");
+  const fallbackWithoutSamplingSent = canonicalFallback.filter((status) => status !== "SAMPLING_SENT");
   const active_statuses: GlobalLotStatus[] = withoutSamplingSent.length
     ? withoutSamplingSent
     : fallbackWithoutSamplingSent.length
@@ -341,7 +342,8 @@ export async function listLots(filters: {
     const upper = raw.toUpperCase();
     if (upper === "SAMPLED") return "SAMPLING_SENT";
     if (upper === "ARRIVED BUT HELD") return "AWR_PENDING";
-    if (upper === "ARRIVED") return "AWR_RECEIVED";
+    if (upper === "ARRIVED") return "CATALOGUED";
+    if (upper === "AWR_RECEIVED") return "CATALOGUED";
     if (upper === "PRINTED") return "CATALOGUED";
     if (upper === "RESERVE PRICE SET") return "RESERVE_SET";
     if (upper === "OUT LOT") return "OUT";
@@ -778,8 +780,8 @@ export async function getActiveStatusesForLots(lotIds: string[]) {
     for (const row of data ?? []) {
       if (!lotIdSet.has(row.lot_id)) continue;
       const arr = result.get(row.lot_id) ?? [];
-      arr.push(row.status as GlobalLotStatus);
-      result.set(row.lot_id, arr);
+      const next = canonicalizeLotStatuses([...arr, row.status as GlobalLotStatus]);
+      result.set(row.lot_id, next);
     }
     return result;
   }
@@ -794,8 +796,8 @@ export async function getActiveStatusesForLots(lotIds: string[]) {
     if (error) throw error;
     for (const row of data ?? []) {
       const arr = result.get(row.lot_id) ?? [];
-      arr.push(row.status as GlobalLotStatus);
-      result.set(row.lot_id, arr);
+      const next = canonicalizeLotStatuses([...arr, row.status as GlobalLotStatus]);
+      result.set(row.lot_id, next);
     }
   }
   return result;
@@ -982,6 +984,18 @@ export async function listPartyOptions() {
     const payload = (row.payload ?? {}) as Record<string, unknown>;
     const broker = String(payload.broker ?? "").trim();
     if (broker) brokerNames.add(broker);
+
+    const buyerName = String(payload.buyer_name ?? "").trim();
+    if (buyerName) buyerNames.add(buyerName);
+
+    const buyer = String(payload.buyer ?? "").trim();
+    if (buyer) buyerNames.add(buyer);
+
+    const buyers = Array.isArray(payload.buyers) ? payload.buyers : [];
+    for (const value of buyers) {
+      const candidate = String(value ?? "").trim();
+      if (candidate) buyerNames.add(candidate);
+    }
   }
   for (const broker of defaultBrokerNames) {
     brokerNames.add(broker);

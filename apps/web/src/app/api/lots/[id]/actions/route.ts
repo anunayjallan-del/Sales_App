@@ -25,6 +25,7 @@ import {
   splitLotStatusLanes
 } from "@/server/services/lot-actions";
 import { deriveWarnings } from "@/server/services/flat-status-engine";
+import { mergeFinalizedSoldAuctionPayload } from "@/server/services/auction-sale-desk";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { GlobalLotStatus } from "@/lib/types";
 
@@ -61,6 +62,25 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const actionPayload = parseActionPayload(parsed.data.action, parsed.data.data);
     if (!actionPayload.success) return badRequest("Missing/invalid action fields", actionPayload.error.issues);
 
+    let validatedPayloadData = actionPayload.data as Record<string, unknown>;
+    if (parsed.data.action === "FINALIZE_SOLD_AUCTION") {
+      const actionRows = await listLotActions(id);
+      const liveSoldAction = actionRows.find((row) => String(row.action) === "SOLD_AUCTION_LIVE");
+      if (!liveSoldAction) {
+        return badRequest("Cannot finalize sold auction without a prior live sale action.");
+      }
+
+      const mergedPayload = mergeFinalizedSoldAuctionPayload(
+        (liveSoldAction.payload as Record<string, unknown> | null) ?? null,
+        validatedPayloadData
+      );
+      const finalPayload = parseActionPayload("SOLD_AUCTION", mergedPayload);
+      if (!finalPayload.success) {
+        return badRequest("Missing/invalid action fields", finalPayload.error.issues);
+      }
+      validatedPayloadData = finalPayload.data as Record<string, unknown>;
+    }
+
     const lanes = splitLotStatusLanes(activeStatuses);
     if (shouldRequireConflictAck(parsed.data.action, lanes.auction)) {
       const expectedPrompt = resolveConflictPromptType(lanes.auction);
@@ -78,7 +98,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     );
 
     const payloadWithAudit = {
-      ...actionPayload.data,
+      ...validatedPayloadData,
       ...(parsed.data.conflict_acknowledged
         ? {
             conflict_acknowledged: true,

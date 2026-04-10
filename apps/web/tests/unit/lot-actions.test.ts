@@ -29,15 +29,34 @@ describe("lot-actions lane model", () => {
 
   it("requires conflict ack for private progression while auction is active", () => {
     expect(shouldRequireConflictAck("SOLD_PENDING_DISPATCH", "IN_TRANSIT")).toBe(true);
+    expect(shouldRequireConflictAck("SOLD_PENDING_DISPATCH", "AWR_RECEIVED")).toBe(true);
     expect(resolveConflictPromptType("IN_TRANSIT")).toBe("EARLY_STAGE_GUIDANCE");
     expect(resolveConflictPromptType("AWR_PENDING")).toBe("MIDDLE_STAGE_1_GUIDANCE");
-    expect(resolveConflictPromptType("AWR_RECEIVED")).toBe("MIDDLE_STAGE_2_GUIDANCE");
+    expect(resolveConflictPromptType("AWR_RECEIVED")).toBe("LATER_STAGE_GUIDANCE");
     expect(resolveConflictPromptType("CATALOGUED")).toBe("LATER_STAGE_GUIDANCE");
     expect(shouldRequireConflictAck("NEGOTIATING", "IN_TRANSIT")).toBe(false);
   });
 
   it("clears private lane when sold in auction", () => {
     const next = applyActionToStatuses("SOLD_AUCTION", ["RESERVE_SET", "SOLD_PENDING_DISPATCH"]);
+    expect(next.nextStatuses).toEqual(["SOLD_AUCTION"]);
+  });
+
+  it("moves live-sold auction lots into pending details before finalization", () => {
+    const next = applyActionToStatuses("SOLD_AUCTION_LIVE", ["REPRINT", "NEGOTIATING"]);
+    expect(next.resultingStatus).toBe("SOLD_AUCTION_PENDING_DETAILS");
+    expect(next.nextStatuses).toEqual(["SOLD_AUCTION_PENDING_DETAILS"]);
+    expect(isActionAllowedForStatuses("SOLD_AUCTION_LIVE", ["CATALOGUED"])).toBe(true);
+    expect(isActionAllowedForStatuses("SOLD_AUCTION_LIVE", ["RESERVE_SET"])).toBe(true);
+    expect(isActionAllowedForStatuses("SOLD_AUCTION_LIVE", ["REPRINT"])).toBe(true);
+  });
+
+  it("finalizes sold auction only from pending details", () => {
+    expect(isActionAllowedForStatuses("FINALIZE_SOLD_AUCTION", ["SOLD_AUCTION_PENDING_DETAILS"])).toBe(true);
+    expect(isActionAllowedForStatuses("FINALIZE_SOLD_AUCTION", ["CATALOGUED"])).toBe(false);
+
+    const next = applyActionToStatuses("FINALIZE_SOLD_AUCTION", ["SOLD_AUCTION_PENDING_DETAILS"]);
+    expect(next.resultingStatus).toBe("SOLD_AUCTION");
     expect(next.nextStatuses).toEqual(["SOLD_AUCTION"]);
   });
 
@@ -53,6 +72,7 @@ describe("lot-actions lane model", () => {
   it("allows payment received for sold auction and sold private", () => {
     expect(isActionAllowedForStatuses("PAYMENT_RECEIVED", ["SOLD_AUCTION"])).toBe(true);
     expect(isActionAllowedForStatuses("PAYMENT_RECEIVED", ["SOLD"])).toBe(true);
+    expect(isActionAllowedForStatuses("PAYMENT_RECEIVED", ["SOLD_AUCTION_PENDING_DETAILS"])).toBe(false);
   });
 
   it("restricts private progression by the requested matrix", () => {
@@ -104,6 +124,25 @@ describe("lot-actions lane model", () => {
       reserve_set_date: "2026-03-04"
     });
     expect(parsed.success).toBe(true);
+  });
+
+  it("accepts live sold and finalize sold auction payloads", () => {
+    const live = parseActionPayload("SOLD_AUCTION_LIVE", {
+      sale_no: "12",
+      sale_date: "2026-03-22",
+      buyer_name: "Buyer A",
+      hammer_price: 405
+    });
+    expect(live.success).toBe(true);
+
+    const finalize = parseActionPayload("FINALIZE_SOLD_AUCTION", {
+      settlement_due_date: "2026-03-29"
+    });
+    expect(finalize.success).toBe(true);
+  });
+
+  it("does not treat pending-details as auction-active for private conflict prompts", () => {
+    expect(shouldRequireConflictAck("SOLD_PENDING_DISPATCH", "SOLD_AUCTION_PENDING_DETAILS")).toBe(false);
   });
 
   it("accepts legacy conflict prompt types temporarily", () => {

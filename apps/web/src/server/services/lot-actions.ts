@@ -9,6 +9,8 @@ export const actionNames = [
   "AWR_RECEIVED",
   "PRINT",
   "SET_RESERVE_PRICE",
+  "SOLD_AUCTION_LIVE",
+  "FINALIZE_SOLD_AUCTION",
   "SOLD_AUCTION",
   "OUT",
   "REPRINT",
@@ -35,9 +37,9 @@ export const auctionLaneStatuses = [
   "PENDING_AUCTION_DISPATCH",
   "IN_TRANSIT",
   "AWR_PENDING",
-  "AWR_RECEIVED",
   "CATALOGUED",
   "RESERVE_SET",
+  "SOLD_AUCTION_PENDING_DETAILS",
   "SOLD_AUCTION",
   "OUT",
   "HOLD",
@@ -75,13 +77,13 @@ type LotStatusLanes = {
 
 const auctionStatusPriority: GlobalLotStatus[] = [
   "SOLD_AUCTION",
+  "SOLD_AUCTION_PENDING_DETAILS",
   "WITHDRAW",
   "REPRINT",
   "HOLD",
   "OUT",
   "RESERVE_SET",
   "CATALOGUED",
-  "AWR_RECEIVED",
   "AWR_PENDING",
   "IN_TRANSIT",
   "PENDING_AUCTION_DISPATCH"
@@ -96,6 +98,8 @@ const auctionActionSet = new Set<LotActionName>([
   "AWR_RECEIVED",
   "PRINT",
   "SET_RESERVE_PRICE",
+  "SOLD_AUCTION_LIVE",
+  "FINALIZE_SOLD_AUCTION",
   "SOLD_AUCTION",
   "OUT",
   "REPRINT",
@@ -117,7 +121,6 @@ const auctionActiveForPrivateConflict = new Set<GlobalLotStatus>([
   "PENDING_AUCTION_DISPATCH",
   "IN_TRANSIT",
   "AWR_PENDING",
-  "AWR_RECEIVED",
   "CATALOGUED",
   "RESERVE_SET",
   "OUT",
@@ -232,16 +235,17 @@ export const actionRules: Record<LotActionName, ActionRule> = {
     })
   },
   AWR_RECEIVED: {
-    resultingStatus: "AWR_RECEIVED",
+    resultingStatus: "CATALOGUED",
     allowedFrom: ["IN_TRANSIT", "AWR_PENDING"],
     schema: z.object({
       arrival_date: z.string().min(1),
+      sale_no: z.string().min(1),
       ...commonRemark
     })
   },
   PRINT: {
     resultingStatus: "CATALOGUED",
-    allowedFrom: ["AWR_RECEIVED"],
+    allowedFrom: ["AWR_RECEIVED", "CATALOGUED"],
     schema: z.object({
       print_date: z.string().min(1),
       sale_no: z.string().min(1),
@@ -255,6 +259,29 @@ export const actionRules: Record<LotActionName, ActionRule> = {
       reserve_price: z.coerce.number().positive(),
       reserve_set_date: z.string().min(1),
       point_of_contact: z.string().optional(),
+      ...commonRemark
+    })
+  },
+  SOLD_AUCTION_LIVE: {
+    resultingStatus: "SOLD_AUCTION_PENDING_DETAILS",
+    allowedFrom: ["CATALOGUED", "RESERVE_SET", "REPRINT"],
+    schema: z.object({
+      sale_no: z.string().min(1),
+      sale_date: z.string().min(1),
+      hammer_price: z.coerce.number().positive(),
+      buyer_name: z.string().min(1),
+      ...commonRemark
+    })
+  },
+  FINALIZE_SOLD_AUCTION: {
+    resultingStatus: "SOLD_AUCTION",
+    allowedFrom: ["SOLD_AUCTION_PENDING_DETAILS"],
+    schema: z.object({
+      sale_no: z.string().min(1).optional(),
+      sale_date: z.string().min(1).optional(),
+      hammer_price: z.coerce.number().positive().optional(),
+      buyer_name: z.string().min(1).optional(),
+      settlement_due_date: z.string().min(1),
       ...commonRemark
     })
   },
@@ -433,18 +460,29 @@ function firstInPriority(statuses: GlobalLotStatus[], priority: GlobalLotStatus[
   return null;
 }
 
+function canonicalizeLegacyAuctionStatus(status: GlobalLotStatus): GlobalLotStatus {
+  if (status === "AWR_RECEIVED") return "CATALOGUED";
+  return status;
+}
+
+export function canonicalizeLotStatuses(statuses: GlobalLotStatus[]): GlobalLotStatus[] {
+  return Array.from(new Set(statuses.map(canonicalizeLegacyAuctionStatus)));
+}
+
 export function splitLotStatusLanes(statuses: GlobalLotStatus[]): LotStatusLanes {
-  if (statuses.includes("CLOSED")) {
+  const canonical = canonicalizeLotStatuses(statuses);
+
+  if (canonical.includes("CLOSED")) {
     return { terminal: "CLOSED", auction: null, private: null };
   }
-  if (statuses.includes("CANCELLED")) {
+  if (canonical.includes("CANCELLED")) {
     return { terminal: "CANCELLED", auction: null, private: null };
   }
 
   return {
     terminal: null,
-    auction: firstInPriority(statuses, auctionStatusPriority),
-    private: firstInPriority(statuses, privateStatusPriority)
+    auction: firstInPriority(canonical, auctionStatusPriority),
+    private: firstInPriority(canonical, privateStatusPriority)
   };
 }
 
@@ -459,6 +497,7 @@ export function buildStatusesFromLanes(lanes: LotStatusLanes): GlobalLotStatus[]
 
 export function normalizeCurrentStatus(statuses: GlobalLotStatus[]): GlobalLotStatus {
   if (!statuses.length) return "PENDING";
+  const canonical = canonicalizeLotStatuses(statuses);
   const priority: GlobalLotStatus[] = [
     "CLOSED",
     "CANCELLED",
@@ -466,6 +505,7 @@ export function normalizeCurrentStatus(statuses: GlobalLotStatus[]): GlobalLotSt
     "SOLD_PENDING_DISPATCH",
     "NEGOTIATING",
     "SOLD_AUCTION",
+    "SOLD_AUCTION_PENDING_DETAILS",
     "PENDING_AUCTION_DISPATCH",
     "WITHDRAW",
     "HOLD",
@@ -473,13 +513,12 @@ export function normalizeCurrentStatus(statuses: GlobalLotStatus[]): GlobalLotSt
     "OUT",
     "RESERVE_SET",
     "CATALOGUED",
-    "AWR_RECEIVED",
     "AWR_PENDING",
     "IN_TRANSIT",
     "PENDING"
   ];
   for (const p of priority) {
-    if (statuses.includes(p)) return p;
+    if (canonical.includes(p)) return p;
   }
   return "PENDING";
 }
@@ -495,10 +534,11 @@ export function isLifecycleAction(action: string): boolean {
 
 export function resolveConflictPromptType(auctionStatus: GlobalLotStatus | null): ConflictPromptType | null {
   if (!auctionStatus) return null;
-  if (auctionStatusesEarlyStage.has(auctionStatus)) return "EARLY_STAGE_GUIDANCE";
-  if (auctionStatusesMiddleStage1.has(auctionStatus)) return "MIDDLE_STAGE_1_GUIDANCE";
-  if (auctionStatusesMiddleStage2.has(auctionStatus)) return "MIDDLE_STAGE_2_GUIDANCE";
-  if (auctionStatusesLaterStage.has(auctionStatus)) return "LATER_STAGE_GUIDANCE";
+  const canonical = canonicalizeLegacyAuctionStatus(auctionStatus);
+  if (auctionStatusesEarlyStage.has(canonical)) return "EARLY_STAGE_GUIDANCE";
+  if (auctionStatusesMiddleStage1.has(canonical)) return "MIDDLE_STAGE_1_GUIDANCE";
+  if (auctionStatusesMiddleStage2.has(canonical)) return "MIDDLE_STAGE_2_GUIDANCE";
+  if (auctionStatusesLaterStage.has(canonical)) return "LATER_STAGE_GUIDANCE";
   return null;
 }
 
@@ -509,7 +549,7 @@ export function isPrivateProgressionAction(action: LotActionName): boolean {
 export function shouldRequireConflictAck(action: LotActionName, auctionStatus: GlobalLotStatus | null): boolean {
   if (!privateCommitmentActions.includes(action as (typeof privateCommitmentActions)[number])) return false;
   if (!auctionStatus) return false;
-  return auctionActiveForPrivateConflict.has(auctionStatus);
+  return auctionActiveForPrivateConflict.has(canonicalizeLegacyAuctionStatus(auctionStatus));
 }
 
 export function isConflictPromptTypeCompatible(
@@ -551,7 +591,7 @@ export function isActionAllowedForStatuses(action: LotActionName, statuses: Glob
     return false;
   }
 
-  if (privateActionSet.has(action) && lanes.auction === "SOLD_AUCTION") {
+  if (privateActionSet.has(action) && (lanes.auction === "SOLD_AUCTION" || lanes.auction === "SOLD_AUCTION_PENDING_DETAILS")) {
     return false;
   }
 
@@ -591,7 +631,13 @@ export function isActionAllowedForStatuses(action: LotActionName, statuses: Glob
 }
 
 export function getAllowedActionsForStatuses(statuses: GlobalLotStatus[]): LotActionName[] {
-  return actionNames.filter((action) => isActionAllowedForStatuses(action, statuses));
+  return actionNames.filter(
+    (action) =>
+      action !== "PRINT" &&
+      action !== "SOLD_AUCTION_LIVE" &&
+      action !== "FINALIZE_SOLD_AUCTION" &&
+      isActionAllowedForStatuses(action, statuses)
+  );
 }
 
 export function applyActionToStatuses(action: LotActionName, currentStatuses: GlobalLotStatus[]): {
@@ -628,7 +674,8 @@ export function applyActionToStatuses(action: LotActionName, currentStatuses: Gl
     const nextLanes: LotStatusLanes = {
       terminal: null,
       auction: nextAuction,
-      private: action === "SOLD_AUCTION" ? null : lanes.private
+      private:
+        action === "SOLD_AUCTION" || action === "SOLD_AUCTION_LIVE" || action === "FINALIZE_SOLD_AUCTION" ? null : lanes.private
     };
     return {
       resultingStatus: nextAuction,

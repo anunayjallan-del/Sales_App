@@ -59,6 +59,7 @@ export const globalLotStatuses = [
   "AWR_RECEIVED",
   "CATALOGUED",
   "RESERVE_SET",
+  "SOLD_AUCTION_PENDING_DETAILS",
   "SOLD_AUCTION",
   "OUT",
   "HOLD",

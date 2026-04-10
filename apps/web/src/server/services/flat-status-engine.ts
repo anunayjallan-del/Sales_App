@@ -4,9 +4,9 @@ const auctionProgression: GlobalLotStatus[] = [
   "PENDING_AUCTION_DISPATCH",
   "IN_TRANSIT",
   "AWR_PENDING",
-  "AWR_RECEIVED",
   "CATALOGUED",
   "RESERVE_SET",
+  "SOLD_AUCTION_PENDING_DETAILS",
   "SOLD_AUCTION",
   "OUT",
   "HOLD",
@@ -19,7 +19,6 @@ const auctionActiveForConflict = new Set<GlobalLotStatus>([
   "PENDING_AUCTION_DISPATCH",
   "IN_TRANSIT",
   "AWR_PENDING",
-  "AWR_RECEIVED",
   "CATALOGUED",
   "RESERVE_SET",
   "OUT",
@@ -32,7 +31,7 @@ function normalizeAuctionStatus(status: AuctionStatus | null): GlobalLotStatus |
   if (status === "AWR_CATALOGUED") return "CATALOGUED";
   if (status === "IN_TRANSIT") return "IN_TRANSIT";
   if (status === "AWR_PENDING") return "AWR_PENDING";
-  if (status === "AWR_RECEIVED") return "AWR_RECEIVED";
+  if (status === "AWR_RECEIVED") return "CATALOGUED";
   if (status === "CATALOGUED") return "CATALOGUED";
   if (status === "RESERVE_SET") return "RESERVE_SET";
   if (status === "SOLD_AUCTION") return "SOLD_AUCTION";

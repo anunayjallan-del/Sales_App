@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import {
   AppstoreOutlined,
   MenuFoldOutlined,
@@ -25,6 +25,7 @@ const links = [
   { href: "/lots", label: "Lots", icon: <AppstoreOutlined /> },
   { href: "/sampling", label: "Sampling", icon: <ExperimentOutlined /> },
   { href: "/dispatch-pending", label: "Pending Dispatches", icon: <ClockCircleOutlined /> },
+  { href: "/in-transit", label: "In Transit", icon: <TruckOutlined /> },
   { href: "/auction-catalogue", label: "Auction Catalogue", icon: <BookOutlined /> },
   { href: "/daily-sync", label: "Daily Sync", icon: <UploadOutlined /> },
   { href: "/dispatch-advices", label: "Dispatch", icon: <TruckOutlined /> },
@@ -32,17 +33,18 @@ const links = [
   { href: "/settings", label: "Settings", icon: <SettingOutlined /> }
 ];
 
-export function AppShell({ children, title: _title }: { children: React.ReactNode; title: string }) {
-  const pathname = usePathname();
-  const router = useRouter();
-  const searchParams = useSearchParams();
-  const screens = Grid.useBreakpoint();
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [masterLotSearch, setMasterLotSearch] = useState("");
-  const selectedKey = links.find((item) => pathname.startsWith(item.href))?.href ?? "/dashboard";
+function normalizeLotNumber(value: string) {
+  return value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 7);
+}
 
-  const normalizeLotNumber = (value: string) => value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 7);
+function MasterLotSearchSync({
+  pathname,
+  setMasterLotSearch
+}: {
+  pathname: string;
+  setMasterLotSearch: React.Dispatch<React.SetStateAction<string>>;
+}) {
+  const searchParams = useSearchParams();
 
   useEffect(() => {
     const fromQuery = normalizeLotNumber(searchParams.get("search") ?? "");
@@ -51,7 +53,19 @@ export function AppShell({ children, title: _title }: { children: React.ReactNod
       return;
     }
     setMasterLotSearch("");
-  }, [pathname, searchParams]);
+  }, [pathname, searchParams, setMasterLotSearch]);
+
+  return null;
+}
+
+export function AppShell({ children, title: _title }: { children: React.ReactNode; title: string }) {
+  const pathname = usePathname();
+  const router = useRouter();
+  const screens = Grid.useBreakpoint();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [masterLotSearch, setMasterLotSearch] = useState("");
+  const selectedKey = links.find((item) => pathname.startsWith(item.href))?.href ?? "/dashboard";
 
   const submitMasterLotSearch = (value?: string) => {
     const normalized = normalizeLotNumber(value ?? masterLotSearch);
@@ -64,6 +78,9 @@ export function AppShell({ children, title: _title }: { children: React.ReactNod
 
   return (
     <Layout style={{ minHeight: "100vh", background: "transparent" }}>
+      <Suspense fallback={null}>
+        <MasterLotSearchSync pathname={pathname} setMasterLotSearch={setMasterLotSearch} />
+      </Suspense>
       {screens.md ? (
         <Layout.Sider
           collapsible

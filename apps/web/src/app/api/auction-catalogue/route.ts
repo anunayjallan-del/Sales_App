@@ -3,6 +3,7 @@ import { requireRole } from "@/lib/authz";
 import { badRequest, ok, serverError } from "@/lib/http";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { GlobalLotStatus } from "@/lib/types";
+import { resolveCatalogueSaleNo } from "@/lib/auction-catalogue";
 import { getAllowedActionsForStatuses, splitLotStatusLanes } from "@/server/services/lot-actions";
 
 type LotRow = {
@@ -26,25 +27,27 @@ function normalizeText(value: unknown): string {
   return String(value ?? "").trim();
 }
 
-function parseSaleNo(payload: Record<string, unknown> | null): string {
-  return normalizeText(payload?.sale_no) || "-";
-}
-
 function parseAuctionCentre(payload: Record<string, unknown> | null): string {
   return normalizeText(payload?.auction_centre) || "-";
+}
+
+function normalizeCatalogueStatus(status: string): GlobalLotStatus {
+  return (status === "AWR_RECEIVED" ? "CATALOGUED" : status) as GlobalLotStatus;
 }
 
 export async function GET(req: NextRequest) {
   try {
     await requireRole(req, ["admin", "operator"]);
-    const status = req.nextUrl.searchParams.get("status")?.trim().toUpperCase() || "CATALOGUED";
+    const requestedStatus = req.nextUrl.searchParams.get("status")?.trim().toUpperCase() || "CATALOGUED";
+    const status = normalizeCatalogueStatus(requestedStatus);
     if (!status) return badRequest("Status is required");
 
     const supabase = getSupabaseAdmin();
-    const { data: activeRows, error: activeError } = await supabase
-      .from("lot_active_statuses")
-      .select("lot_id,status")
-      .eq("status", status);
+    const activeStatusQuery = supabase.from("lot_active_statuses").select("lot_id,status");
+    const { data: activeRows, error: activeError } =
+      status === "CATALOGUED"
+        ? await activeStatusQuery.in("status", ["CATALOGUED", "AWR_RECEIVED"])
+        : await activeStatusQuery.eq("status", status);
     if (activeError) throw activeError;
 
     const lotIds = Array.from(new Set((activeRows ?? []).map((row) => String(row.lot_id)).filter(Boolean)));
@@ -53,10 +56,10 @@ export async function GET(req: NextRequest) {
     const activeStatusesByLot = new Map<string, GlobalLotStatus[]>();
     for (const row of activeRows ?? []) {
       const lotId = String(row.lot_id);
-      const statusValue = String(row.status ?? "").trim() as GlobalLotStatus;
+      const statusValue = normalizeCatalogueStatus(String(row.status ?? "").trim());
       if (!statusValue) continue;
       const statuses = activeStatusesByLot.get(lotId) ?? [];
-      statuses.push(statusValue);
+      if (!statuses.includes(statusValue)) statuses.push(statusValue);
       activeStatusesByLot.set(lotId, statuses);
     }
 
@@ -101,7 +104,7 @@ export async function GET(req: NextRequest) {
         .from("lot_actions")
         .select("lot_id,action,payload,performed_at")
         .in("lot_id", chunk)
-        .in("action", ["DISPATCH_TO_AUCTION", "PRINT", "SET_RESERVE_PRICE", "SOLD_AUCTION", "OUT"])
+        .in("action", ["DISPATCH_TO_AUCTION", "AWR_RECEIVED", "PRINT", "SET_RESERVE_PRICE", "SOLD_AUCTION", "OUT", "REPRINT"])
         .order("performed_at", { ascending: false });
       if (actionError) throw actionError;
       for (const row of actionChunk ?? []) {
@@ -123,11 +126,6 @@ export async function GET(req: NextRequest) {
         if (!lot) return null;
         const actions = actionsByLot.get(lotId) ?? [];
         const dispatch = actions.find((row) => row.action === "DISPATCH_TO_AUCTION");
-        const saleAction =
-          actions.find((row) => row.action === "PRINT") ??
-          actions.find((row) => row.action === "SET_RESERVE_PRICE") ??
-          actions.find((row) => row.action === "OUT") ??
-          actions.find((row) => row.action === "SOLD_AUCTION");
         const activeStatuses = (activeStatusesByLot.get(lotId) ?? [])
           .map((value) => String(value).trim() as GlobalLotStatus)
           .filter((value) => Boolean(value) && value !== "SAMPLING_SENT");
@@ -144,7 +142,7 @@ export async function GET(req: NextRequest) {
           ...lot,
           status,
           auction_centre: parseAuctionCentre(dispatch?.payload ?? null),
-          sale_no: parseSaleNo(saleAction?.payload ?? null),
+          sale_no: resolveCatalogueSaleNo(actions),
           active_statuses: activeStatuses,
           auction_lane_status: laneStatuses.auction,
           private_lane_status: laneStatuses.private,

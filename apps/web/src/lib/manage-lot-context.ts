@@ -6,6 +6,8 @@ export type ManageLotActionName =
   | "AWR_RECEIVED"
   | "PRINT"
   | "SET_RESERVE_PRICE"
+  | "SOLD_AUCTION_LIVE"
+  | "FINALIZE_SOLD_AUCTION"
   | "SOLD_AUCTION"
   | "OUT"
   | "REPRINT"
@@ -54,6 +56,8 @@ const auctionActionSet = new Set<string>([
   "AWR_RECEIVED",
   "PRINT",
   "SET_RESERVE_PRICE",
+  "SOLD_AUCTION_LIVE",
+  "FINALIZE_SOLD_AUCTION",
   "SOLD_AUCTION",
   "OUT",
   "REPRINT",
@@ -70,9 +74,11 @@ const actionFieldOrder: Record<string, string[]> = {
   DISPATCH_TO_AUCTION: ["advice_date", "broker", "warehouse", "auction_centre", "remarks"],
   AUCTION_DISPATCHED: ["dispatch_date", "transporter", "remarks"],
   HOLD_AWR: ["arrival_date", "remarks"],
-  AWR_RECEIVED: ["arrival_date", "remarks"],
-  PRINT: ["print_date", "sale_no", "remarks"],
+  AWR_RECEIVED: ["arrival_date", "sale_no", "remarks"],
+  PRINT: ["sale_no", "remarks"],
   SET_RESERVE_PRICE: ["reserve_price", "reserve_set_date", "point_of_contact", "remarks"],
+  SOLD_AUCTION_LIVE: ["sale_no", "sale_date", "hammer_price", "buyer_name"],
+  FINALIZE_SOLD_AUCTION: ["sale_no", "sale_date", "hammer_price", "buyer_name", "settlement_due_date", "remarks"],
   SOLD_AUCTION: ["sale_no", "sale_date", "hammer_price", "buyer_name", "settlement_due_date", "remarks"],
   OUT: ["sale_no", "out_date", "out_price", "remarks"],
   REPRINT: ["reprint_date", "target_sale_no", "remarks"],
@@ -233,7 +239,10 @@ export function buildSamplingHistory(rows: ManageLotActionRow[]): TimelineEntry[
 }
 
 function resolvePaymentLaneContext(lot: ManageLotLaneSnapshot | null | undefined, rows: ManageLotActionRow[]): ContextMode {
-  const latestSoldOrigin = sortRows(rows).find((row) => row.action === "SOLD_AUCTION" || row.action === "SOLD_PRIVATE");
+  const latestSoldOrigin = sortRows(rows).find(
+    (row) => row.action === "FINALIZE_SOLD_AUCTION" || row.action === "SOLD_AUCTION" || row.action === "SOLD_PRIVATE"
+  );
+  if (latestSoldOrigin?.action === "FINALIZE_SOLD_AUCTION") return "auction";
   if (latestSoldOrigin?.action === "SOLD_AUCTION") return "auction";
   if (latestSoldOrigin?.action === "SOLD_PRIVATE") return "private";
 
