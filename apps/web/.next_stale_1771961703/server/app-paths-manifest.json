@@ -1,7 +1,0 @@
-{
-  "/api/lots/route": "app/api/lots/route.js",
-  "/_not-found/page": "app/_not-found/page.js",
-  "/lots/page": "app/lots/page.js",
-  "/dashboard/page": "app/dashboard/page.js",
-  "/lots/[id]/page": "app/lots/[id]/page.js"
-}
