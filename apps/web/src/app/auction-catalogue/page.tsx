@@ -1,36 +1,19 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CloseOutlined } from "@ant-design/icons";
-import { App, Button, Card, Checkbox, Col, Drawer, Empty, Input, InputNumber, Popconfirm, Row, Select, Space, Spin, Table, Tag, Tooltip, Typography } from "antd";
+import { App, Button, Card, Checkbox, Col, Drawer, Empty, Input, InputNumber, Popconfirm, Row, Select, Space, Spin, Tabs, Tag, Tooltip, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { AppShell } from "@/components/app-shell";
+import { AuctionCatalogueSaleDetail } from "@/components/auction-catalogue-sale-detail";
+import { AuctionCatalogueSaleList } from "@/components/auction-catalogue-sale-list";
 import { ManageLotHistoryContext } from "@/components/manage-lot-history-context";
 import { fetchJson } from "@/lib/fetcher";
 import { handleEnterToSubmit } from "@/lib/keyboard-submit";
-
-type CatalogueRow = {
-  id: string;
-  mark: string;
-  invoice_number: string;
-  grade: string;
-  bags: number;
-  net_weight_kg: number;
-  date_created: string;
-  auction_centre: string;
-  sale_no: string;
-  status: string;
-  active_statuses?: string[];
-  auction_lane_status?: string | null;
-  private_lane_status?: string | null;
-  is_sampled?: boolean;
-  allowed_actions?: string[];
-  reinvoiced_from_lot_id?: string | null;
-  negotiating_buyers?: string[];
-  last_negotiated_on?: string | null;
-};
+import { type CatalogueRow, filterSaleGroups, groupCatalogueRows, resolveActiveCatalogueSelection } from "@/lib/auction-catalogue";
 
 type ReinvoiceTargetRow = {
   id: string;
@@ -44,23 +27,6 @@ type LotActionRow = {
   action: string;
   payload?: Record<string, unknown> | null;
   performed_at: string;
-};
-
-type MarkGroup = {
-  mark: string;
-  rows: CatalogueRow[];
-  totalBags: number;
-  totalQuantity: number;
-};
-
-type SaleGroup = {
-  saleNo: string;
-  markGroups: MarkGroup[];
-};
-
-type CentreGroup = {
-  centre: string;
-  saleGroups: SaleGroup[];
 };
 
 type ActionName =
@@ -395,7 +361,10 @@ function formatPackingDate(value: string): string {
 }
 
 export default function AuctionCataloguePage() {
+  const pathname = usePathname();
   const queryClient = useQueryClient();
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const { message, modal } = App.useApp();
 
   const [selectedLotIds, setSelectedLotIds] = useState<string[]>([]);
@@ -413,6 +382,7 @@ export default function AuctionCataloguePage() {
   const [bulkActionData, setBulkActionData] = useState<Record<string, unknown>>({});
   const [bulkPartySearch, setBulkPartySearch] = useState("");
   const [reinvoiceTargetSearch, setReinvoiceTargetSearch] = useState("");
+  const [saleSearchByCentre, setSaleSearchByCentre] = useState<Record<string, string>>({});
 
   const { data, isLoading } = useQuery({
     queryKey: ["auction-catalogue"],
@@ -442,44 +412,32 @@ export default function AuctionCataloguePage() {
   });
 
   const rows = useMemo(() => data?.rows ?? [], [data?.rows]);
-
-  const grouped = useMemo<CentreGroup[]>(() => {
-    const centreMap = new Map<string, Map<string, Map<string, CatalogueRow[]>>>();
-    for (const row of rows) {
-      const centre = row.auction_centre || "-";
-      const saleNo = row.sale_no || "-";
-      const mark = row.mark || "-";
-      const saleMap = centreMap.get(centre) ?? new Map<string, Map<string, CatalogueRow[]>>();
-      const markMap = saleMap.get(saleNo) ?? new Map<string, CatalogueRow[]>();
-      const lots = markMap.get(mark) ?? [];
-      lots.push(row);
-      markMap.set(mark, lots);
-      saleMap.set(saleNo, markMap);
-      centreMap.set(centre, saleMap);
-    }
-
-    return Array.from(centreMap.entries())
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([centre, saleMap]) => ({
-        centre,
-        saleGroups: Array.from(saleMap.entries())
-          .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true, sensitivity: "base" }))
-          .map(([saleNo, markMap]) => ({
-            saleNo,
-            markGroups: Array.from(markMap.entries())
-              .sort((a, b) => a[0].localeCompare(b[0]))
-              .map(([mark, groupedRows]) => ({
-                mark,
-                rows: [...groupedRows].sort((a, b) => a.invoice_number.localeCompare(b.invoice_number)),
-                totalBags: groupedRows.reduce((sum, lot) => sum + Number(lot.bags ?? 0), 0),
-                totalQuantity: groupedRows.reduce((sum, lot) => sum + Number(lot.net_weight_kg ?? 0), 0)
-              }))
-          }))
-      }));
-  }, [rows]);
-
-  const selectedRows = useMemo(() => rows.filter((row) => selectedLotIds.includes(row.id)), [rows, selectedLotIds]);
-  const hasBulkSelection = selectedLotIds.length >= 2;
+  const grouped = useMemo(() => groupCatalogueRows(rows), [rows]);
+  const searchParamsString = searchParams.toString();
+  const requestedAuctionCentre = searchParams.get("auctionCentre");
+  const requestedSaleNo = searchParams.get("saleNo");
+  const { activeCentre, activeSaleNo } = useMemo(
+    () => resolveActiveCatalogueSelection(grouped, requestedAuctionCentre, requestedSaleNo),
+    [grouped, requestedAuctionCentre, requestedSaleNo]
+  );
+  const activeCentreGroup = useMemo(
+    () => grouped.find((centreGroup) => centreGroup.centre === activeCentre) ?? null,
+    [activeCentre, grouped]
+  );
+  const activeSaleGroup = useMemo(
+    () => activeCentreGroup?.saleGroups.find((saleGroup) => saleGroup.saleNo === activeSaleNo) ?? null,
+    [activeCentreGroup, activeSaleNo]
+  );
+  const activeCentreSaleSearch = activeCentre ? saleSearchByCentre[activeCentre] ?? "" : "";
+  const filteredSaleGroups = useMemo(
+    () => filterSaleGroups(activeCentreGroup?.saleGroups ?? [], activeCentreSaleSearch),
+    [activeCentreGroup, activeCentreSaleSearch]
+  );
+  const detailSaleGroup = filteredSaleGroups.length === 0 ? null : activeSaleGroup;
+  const activeSaleRows = useMemo(() => activeSaleGroup?.markGroups.flatMap((markGroup) => markGroup.rows) ?? [], [activeSaleGroup]);
+  const activeSaleLotIds = useMemo(() => activeSaleRows.map((row) => row.id), [activeSaleRows]);
+  const selectedRows = useMemo(() => activeSaleRows.filter((row) => selectedLotIds.includes(row.id)), [activeSaleRows, selectedLotIds]);
+  const hasBulkSelection = selectedRows.length >= 2;
 
   const bulkLaneAlignment = useMemo(() => {
     if (selectedRows.length < 2) {
@@ -617,6 +575,71 @@ export default function AuctionCataloguePage() {
         })),
     [reinvoiceTargetsData?.rows, selectedLotIds]
   );
+
+  const updateCatalogueRoute = useCallback((auctionCentre: string, saleNo: string) => {
+    const params = new URLSearchParams(searchParamsString);
+    params.set("auctionCentre", auctionCentre);
+    params.set("saleNo", saleNo);
+    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+  }, [pathname, router, searchParamsString]);
+
+  useEffect(() => {
+    if (!activeCentre || !activeSaleNo) return;
+    if (requestedAuctionCentre === activeCentre && requestedSaleNo === activeSaleNo) return;
+    updateCatalogueRoute(activeCentre, activeSaleNo);
+  }, [activeCentre, activeSaleNo, requestedAuctionCentre, requestedSaleNo, updateCatalogueRoute]);
+
+  useEffect(() => {
+    setSelectedLotIds((prev) => {
+      const next = prev.filter((id) => activeSaleLotIds.includes(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [activeSaleLotIds]);
+
+  const confirmClearSelection = async (nextLabel: string) => {
+    if (!selectedLotIds.length) return true;
+    return new Promise<boolean>((resolve) => {
+      modal.confirm({
+        title: "Clear current selection?",
+        content: `Switching to ${nextLabel} will clear the lots currently selected in this sale.`,
+        okText: "Continue",
+        cancelText: "Stay here",
+        onOk: () => resolve(true),
+        onCancel: () => resolve(false)
+      });
+    });
+  };
+
+  const openSaleContext = async (auctionCentre: string, saleNo: string) => {
+    if (auctionCentre === activeCentre && saleNo === activeSaleNo) return;
+
+    const confirmed = await confirmClearSelection(`Sale No. ${saleNo}`);
+    if (!confirmed) return;
+
+    if (selectedLotIds.length) {
+      setSelectedLotIds([]);
+    }
+
+    updateCatalogueRoute(auctionCentre, saleNo);
+  };
+
+  const handleCentreTabChange = async (nextCentre: string) => {
+    const nextCentreGroup = grouped.find((centreGroup) => centreGroup.centre === nextCentre);
+    if (!nextCentreGroup) return;
+
+    const nextSearch = saleSearchByCentre[nextCentre] ?? "";
+    const nextVisibleSale = filterSaleGroups(nextCentreGroup.saleGroups, nextSearch)[0] ?? nextCentreGroup.saleGroups[0];
+    if (!nextVisibleSale) return;
+
+    const confirmed = await confirmClearSelection(nextCentre);
+    if (!confirmed) return;
+
+    if (selectedLotIds.length) {
+      setSelectedLotIds([]);
+    }
+
+    updateCatalogueRoute(nextCentre, nextVisibleSale.saleNo);
+  };
 
   const manageMutation = useMutation({
     mutationFn: (payload: {
@@ -1031,6 +1054,18 @@ export default function AuctionCataloguePage() {
     setBulkActionDetailsOpen(true);
   };
 
+  const setActiveCentreSaleSearch = (value: string) => {
+    if (!activeCentre) return;
+    setSaleSearchByCentre((prev) => ({ ...prev, [activeCentre]: value }));
+  };
+
+  const setLotSelection = (lotId: string, selected: boolean) => {
+    setSelectedLotIds((prev) => {
+      if (selected) return (prev.includes(lotId) ? prev : [...prev, lotId]);
+      return prev.filter((id) => id !== lotId);
+    });
+  };
+
   const toggleSelectedLot = (lotId: string) => {
     setSelectedLotIds((prev) => (prev.includes(lotId) ? prev.filter((id) => id !== lotId) : [...prev, lotId]));
   };
@@ -1198,104 +1233,47 @@ export default function AuctionCataloguePage() {
               </Space>
             </div>
           ) : null}
-          {grouped.map((centreGroup) => (
-            <Card key={centreGroup.centre}>
-              <Typography.Title level={5} style={{ marginTop: 0 }}>
-                Auction Centre: {centreGroup.centre}
-              </Typography.Title>
-              <Space direction="vertical" size={16} style={{ width: "100%" }}>
-                {centreGroup.saleGroups.map((saleGroup) => (
-                  <Card key={`${centreGroup.centre}-${saleGroup.saleNo}`} variant="borderless" style={{ background: "#fafafa" }}>
-                    {(() => {
-                      const saleLotIds = saleGroup.markGroups.flatMap((markGroup) => markGroup.rows.map((row) => row.id));
-                      const selectedCount = saleLotIds.filter((id) => selectedLotIds.includes(id)).length;
-                      const allSelected = saleLotIds.length > 0 && selectedCount === saleLotIds.length;
-                      const partiallySelected = selectedCount > 0 && !allSelected;
+          <Card>
+            <Tabs
+              activeKey={activeCentre ?? undefined}
+              onChange={(nextCentre) => {
+                void handleCentreTabChange(nextCentre);
+              }}
+              items={grouped.map((centreGroup) => ({
+                key: centreGroup.centre,
+                label: `${centreGroup.centre} (${centreGroup.saleGroups.length})`
+              }))}
+            />
 
-                      return (
-                        <Space direction="vertical" size={10} style={{ width: "100%", marginBottom: 12 }}>
-                          <Space style={{ width: "100%", justifyContent: "space-between" }} align="center">
-                            <Typography.Title level={5} style={{ margin: 0 }}>
-                              Sale No.: {saleGroup.saleNo}
-                            </Typography.Title>
-                            <Link
-                              href={`/auction-catalogue/live?auctionCentre=${encodeURIComponent(centreGroup.centre)}&saleNo=${encodeURIComponent(saleGroup.saleNo)}`}
-                              aria-disabled={saleGroup.saleNo === "-" || centreGroup.centre === "-"}
-                              onClick={(event) => {
-                                if (saleGroup.saleNo === "-" || centreGroup.centre === "-") {
-                                  event.preventDefault();
-                                }
-                              }}
-                            >
-                              <Button size="small" disabled={saleGroup.saleNo === "-" || centreGroup.centre === "-"}>
-                                Open Sale Desk
-                              </Button>
-                            </Link>
-                          </Space>
-                          <Checkbox
-                            checked={allSelected}
-                            indeterminate={partiallySelected}
-                            onChange={(event) => setSaleGroupSelection(saleLotIds, event.target.checked)}
-                          >
-                            Select all lots in this sale
-                            {selectedCount ? ` (${selectedCount}/${saleLotIds.length})` : ` (${saleLotIds.length})`}
-                          </Checkbox>
-                        </Space>
-                      );
-                    })()}
-                    <Space direction="vertical" size={12} style={{ width: "100%" }}>
-                      {saleGroup.markGroups.map((markGroup) => (
-                        <Card key={`${centreGroup.centre}-${saleGroup.saleNo}-${markGroup.mark}`} size="small">
-                          <Space align="baseline" style={{ marginBottom: 10 }}>
-                            <Typography.Title level={5} style={{ margin: 0 }}>
-                              Mark: {markGroup.mark}
-                            </Typography.Title>
-                            <Typography.Text type="secondary">
-                              Bags: {markGroup.totalBags} | Quantity: {markGroup.totalQuantity.toFixed(3)} kgs
-                            </Typography.Text>
-                          </Space>
-                          <Table<CatalogueRow>
-                            rowKey="id"
-                            columns={columns}
-                            dataSource={markGroup.rows}
-                            rowSelection={{
-                              selectedRowKeys: markGroup.rows
-                                .map((row) => row.id)
-                                .filter((id) => selectedLotIds.includes(id)),
-                              onSelect: (record, selected) => {
-                                setSelectedLotIds((prev) => {
-                                  if (selected) return Array.from(new Set([...prev, String(record.id)]));
-                                  return prev.filter((id) => id !== String(record.id));
-                                });
-                              },
-                              onSelectAll: (selected, _selectedRows, changeRows) => {
-                                const changedIds = changeRows.map((row) => String(row.id));
-                                setSelectedLotIds((prev) => {
-                                  if (selected) return Array.from(new Set([...prev, ...changedIds]));
-                                  return prev.filter((id) => !changedIds.includes(id));
-                                });
-                              }
-                            }}
-                            onRow={(record) => ({
-                              onClick: (event) => {
-                                const target = event.target as HTMLElement;
-                                if (target.closest("button, a, input, .ant-checkbox-wrapper, .ant-checkbox, .ant-select, .ant-input-number")) return;
-                                toggleSelectedLot(record.id);
-                              }
-                            })}
-                            rowClassName={() => "clickable-lot-row"}
-                            pagination={false}
-                            size="small"
-                            scroll={{ x: 840 }}
-                          />
-                        </Card>
-                      ))}
-                    </Space>
-                  </Card>
-                ))}
-              </Space>
-            </Card>
-          ))}
+            <Row gutter={[16, 16]}>
+              <Col xs={24} xl={8}>
+                <AuctionCatalogueSaleList
+                  auctionCentre={activeCentre ?? "-"}
+                  activeSaleNo={activeSaleNo}
+                  saleGroups={filteredSaleGroups}
+                  searchValue={activeCentreSaleSearch}
+                  onSearchChange={setActiveCentreSaleSearch}
+                  onSelectSale={(saleNo) => {
+                    if (!activeCentre) return;
+                    void openSaleContext(activeCentre, saleNo);
+                  }}
+                />
+              </Col>
+
+              <Col xs={24} xl={16}>
+                <AuctionCatalogueSaleDetail
+                  auctionCentre={activeCentre}
+                  saleGroup={detailSaleGroup}
+                  selectedLotIds={selectedLotIds}
+                  columns={columns}
+                  emptyDescription="No sale weeks match the current search."
+                  onToggleLot={toggleSelectedLot}
+                  onSetLotSelection={setLotSelection}
+                  onSetManyLotsSelection={setSaleGroupSelection}
+                />
+              </Col>
+            </Row>
+          </Card>
         </Space>
       )}
 
