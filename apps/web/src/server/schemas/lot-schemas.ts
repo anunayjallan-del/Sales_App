@@ -40,7 +40,7 @@ export const patchAuctionSchema = z.object({
   payment_received_date: z.string().nullable().optional()
 });
 
-export const createPrivateDealSchema = z.object({
+const createPrivateDealBaseSchema = z.object({
   lot_id: z.string().uuid(),
   buyer_id: z.string().uuid(),
   status: z.enum(privateDealStatuses),
@@ -52,7 +52,28 @@ export const createPrivateDealSchema = z.object({
   notes: z.string().nullable().optional()
 });
 
-export const patchPrivateDealSchema = createPrivateDealSchema.partial().omit({ lot_id: true, buyer_id: true });
+export const createPrivateDealSchema = createPrivateDealBaseSchema.superRefine((value, ctx) => {
+  if (value.status === "NEGOTIATING" || value.status === "SAMPLING_SENT") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["status"],
+      message: "Use lot action RPC flow for NEGOTIATING and SAMPLING states."
+    });
+  }
+});
+
+export const patchPrivateDealSchema = createPrivateDealBaseSchema
+  .partial()
+  .omit({ lot_id: true, buyer_id: true })
+  .superRefine((value, ctx) => {
+    if (value.status === "NEGOTIATING" || value.status === "SAMPLING_SENT") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["status"],
+        message: "Use lot action RPC flow for NEGOTIATING and SAMPLING states."
+      });
+    }
+  });
 
 export const bulkSamplingSchema = z.object({
   lot_ids: z.array(z.string().uuid()).min(1),
@@ -102,7 +123,16 @@ export const createLotStatusEventSchema = z.object({
 export const createLotActionSchema = z.object({
   action: z.enum(actionNames),
   data: z.record(z.string(), z.any()).default({}),
+  expected_lot_updated_at: z.string().optional(),
   conflict_acknowledged: z.boolean().optional(),
   conflict_prompt_type: z.enum(acceptedConflictPromptTypes).optional(),
   conflict_acknowledged_at: z.string().optional()
+}).superRefine((value, ctx) => {
+  if (value.action === "NEGOTIATING" && !String(value.expected_lot_updated_at ?? "").trim()) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["expected_lot_updated_at"],
+      message: "expected_lot_updated_at is required for NEGOTIATING."
+    });
+  }
 });

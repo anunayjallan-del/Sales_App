@@ -5,9 +5,12 @@ import {
   addLotStatusEvent,
   createLotAction,
   getActiveStatusesForLots,
+  getLotActionById,
   getLatestDispatchToAuctionAction,
   getLotWithRelations,
   listLotActions,
+  recordNegotiatingViaRpc,
+  recordSamplingViaRpc,
   replaceLotActiveStatuses
 } from "@/server/repositories/lots-repo";
 import { createLotActionSchema } from "@/server/schemas/lot-schemas";
@@ -107,6 +110,142 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           }
         : {})
     } as Record<string, unknown>;
+
+    if (parsed.data.action === "SAMPLING") {
+      const expectedLotUpdatedAt = String(parsed.data.expected_lot_updated_at ?? "").trim();
+      if (!expectedLotUpdatedAt) {
+        return badRequest("Missing expected lot timestamp for sampling.");
+      }
+
+      const samplingPayload = validatedPayloadData as {
+        parties: string[];
+        sampling_date: string;
+        follow_up_due_date?: string;
+        remarks?: string;
+      };
+
+      try {
+        const samplingResult = await recordSamplingViaRpc({
+          lot_id: id,
+          expected_lot_updated_at: expectedLotUpdatedAt,
+          parties: samplingPayload.parties,
+          sampling_date: samplingPayload.sampling_date,
+          follow_up_due_date: samplingPayload.follow_up_due_date,
+          remarks: samplingPayload.remarks
+        });
+
+        const actionRow = await getLotActionById(id, samplingResult.action_id);
+        const latestStatuses = ((await getActiveStatusesForLots([id])).get(id) ?? activeStatuses) as GlobalLotStatus[];
+        const warnings = deriveWarnings(latestStatuses);
+
+        return ok(
+          {
+            action:
+              actionRow ??
+              ({
+                id: samplingResult.action_id,
+                lot_id: id,
+                action: "SAMPLING",
+                payload: payloadWithAudit
+              } as Record<string, unknown>),
+            activeStatuses: latestStatuses,
+            warnings,
+            sampling: {
+              sampling_event_id: samplingResult.sampling_event_id,
+              resolved_follow_up_due_date: samplingResult.resolved_follow_up_due_date,
+              lot_updated_at: samplingResult.lot_updated_at
+            }
+          },
+          201
+        );
+      } catch (rpcError) {
+        const code = String(
+          typeof rpcError === "object" &&
+            rpcError !== null &&
+            "message" in rpcError &&
+            typeof rpcError.message === "string"
+            ? rpcError.message
+            : ""
+        ).trim();
+
+        if (code === "STALE_LOT_WRITE") {
+          return badRequest("Sampling save rejected due to stale lot version. Refresh and retry.");
+        }
+        if (code.startsWith("SAMPLING_")) {
+          return badRequest(code);
+        }
+        throw rpcError;
+      }
+    }
+
+    if (parsed.data.action === "NEGOTIATING") {
+      const expectedLotUpdatedAt = String(parsed.data.expected_lot_updated_at ?? "").trim();
+      if (!expectedLotUpdatedAt) {
+        return badRequest("Missing expected lot timestamp for negotiating.");
+      }
+
+      const negotiatingPayload = validatedPayloadData as {
+        broker: string;
+        buyers: string[];
+        negotiation_date: string;
+        remarks?: string;
+      };
+
+      try {
+        const negotiatingResult = await recordNegotiatingViaRpc({
+          lot_id: id,
+          expected_lot_updated_at: expectedLotUpdatedAt,
+          broker: negotiatingPayload.broker,
+          buyers: negotiatingPayload.buyers,
+          negotiation_date: negotiatingPayload.negotiation_date,
+          remarks: negotiatingPayload.remarks
+        });
+
+        const actionRow = await getLotActionById(id, negotiatingResult.action_id);
+        const latestStatuses = ((await getActiveStatusesForLots([id])).get(id) ?? activeStatuses) as GlobalLotStatus[];
+        const warnings = deriveWarnings(latestStatuses);
+
+        return ok(
+          {
+            action:
+              actionRow ??
+              ({
+                id: negotiatingResult.action_id,
+                lot_id: id,
+                action: "NEGOTIATING",
+                payload: payloadWithAudit
+              } as Record<string, unknown>),
+            activeStatuses: latestStatuses,
+            warnings,
+            negotiating: {
+              created_deal_count: negotiatingResult.created_deal_count,
+              lot_updated_at: negotiatingResult.lot_updated_at
+            }
+          },
+          201
+        );
+      } catch (rpcError) {
+        const code = String(
+          typeof rpcError === "object" &&
+            rpcError !== null &&
+            "message" in rpcError &&
+            typeof rpcError.message === "string"
+            ? rpcError.message
+            : ""
+        ).trim();
+
+        if (code === "STALE_LOT_WRITE") {
+          return badRequest("Negotiating save rejected due to stale lot version. Refresh and retry.");
+        }
+        if (code === "DUPLICATE_NEGOTIATING_BUYER") {
+          return badRequest("Duplicate open negotiating buyer for this lot.");
+        }
+        if (code.startsWith("NEGOTIATING_")) {
+          return badRequest(code);
+        }
+        throw rpcError;
+      }
+    }
 
     const rule = actionRules[parsed.data.action];
     const transition = applyActionToStatuses(parsed.data.action, activeStatuses);

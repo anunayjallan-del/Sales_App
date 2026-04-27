@@ -11,17 +11,22 @@ import { handleEnterToSubmit } from "@/lib/keyboard-submit";
 
 type SamplingRow = {
   id: string;
+  action_id?: string | null;
+  sampling_event_id?: string | null;
   lot_id: string;
   performed_at: string;
   payload?: {
     parties?: string[];
     sampling_date?: string;
+    follow_up_due_date?: string;
+    party_follow_ups?: Array<{ party: string; follow_up_due_date: string }>;
     remarks?: string;
   } | null;
   lots?: {
     mark?: string;
     invoice_number?: string;
     grade?: string;
+    updated_at?: string;
   } | null;
 };
 
@@ -34,6 +39,7 @@ type PartyViewRow = {
   lot_numbers: string[];
   grades: string;
   sampling_date: string;
+  follow_up_due: string;
   remarks: string;
   performed_at: string;
 };
@@ -45,6 +51,7 @@ type LotRow = {
   grade: string;
   bags: number;
   net_weight_kg: number;
+  updated_at: string;
   active_statuses?: string[];
   lifecycle_status?: string;
 };
@@ -55,6 +62,7 @@ type SamplingDraftRow = {
   mark: string;
   lotIds: string[];
   lotNumbers: string[];
+  lotExpectedUpdatedAtById: Record<string, string>;
 };
 
 type HistoryGroup = {
@@ -137,6 +145,7 @@ export default function SamplingPage() {
   const [viewMode, setViewMode] = useState<ViewMode>("LOT");
   const [isAddingNew, setIsAddingNew] = useState(false);
   const [batchSamplingDate, setBatchSamplingDate] = useState(todayIsoDate());
+  const [batchFollowUpDueDate, setBatchFollowUpDueDate] = useState("");
   const [draftRows, setDraftRows] = useState<SamplingDraftRow[]>([]);
   const [activeRowId, setActiveRowId] = useState<string | null>(null);
   const [lotModalMark, setLotModalMark] = useState("");
@@ -209,22 +218,32 @@ export default function SamplingPage() {
       }
       await Promise.all(draftRows.flatMap((row) =>
         row.lotIds.map((lotId) =>
-          fetchJson(`/api/lots/${lotId}/actions`, {
-            method: "POST",
-            body: JSON.stringify({
-              action: "SAMPLING",
-              data: {
-                parties: [row.party],
-                sampling_date: batchSamplingDate
-              }
-            })
-          })
+          {
+            const expectedLotUpdatedAt = row.lotExpectedUpdatedAtById[lotId];
+            if (!expectedLotUpdatedAt) {
+              throw new Error(`Missing expected lot version for ${lotId}. Reload lots and retry.`);
+            }
+
+            return fetchJson(`/api/lots/${lotId}/actions`, {
+              method: "POST",
+              body: JSON.stringify({
+                action: "SAMPLING",
+                expected_lot_updated_at: expectedLotUpdatedAt,
+                data: {
+                  parties: [row.party],
+                  sampling_date: batchSamplingDate,
+                  ...(batchFollowUpDueDate ? { follow_up_due_date: batchFollowUpDueDate } : {})
+                }
+              })
+            });
+          }
         )
       ));
     },
     onSuccess: async () => {
       message.success("Sampling recorded");
       setIsAddingNew(false);
+      setBatchFollowUpDueDate("");
       setDraftRows([]);
       setActiveRowId(null);
       await queryClient.invalidateQueries({ queryKey: ["sampling-records"] });
@@ -410,7 +429,11 @@ export default function SamplingPage() {
           style={{ minWidth: 220 }}
           disabled={!row.party}
           onChange={(value) => {
-            setDraftRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, mark: value, lotIds: [], lotNumbers: [] } : r)));
+            setDraftRows((prev) =>
+              prev.map((r) =>
+                r.id === row.id ? { ...r, mark: value, lotIds: [], lotNumbers: [], lotExpectedUpdatedAtById: {} } : r
+              )
+            );
             setActiveRowId(row.id);
             setLotModalMark(value);
             setLotModalStatusFilter([]);
@@ -540,6 +563,7 @@ export default function SamplingPage() {
         sampling_date: string;
         lot_numbers: Set<string>;
         grades: Set<string>;
+        follow_up_due_dates: Set<string>;
         remarks: Set<string>;
         performed_at: string;
       }
@@ -547,6 +571,7 @@ export default function SamplingPage() {
 
     for (const row of searchedRows) {
       const samplingDate = row.payload?.sampling_date ?? "-";
+      const rowFollowUpDueDate = row.payload?.follow_up_due_date ?? "";
       const mark = row.lots?.mark ?? "-";
       const lotNo = row.lots?.invoice_number ?? "-";
       const grade = row.lots?.grade ?? "-";
@@ -554,9 +579,11 @@ export default function SamplingPage() {
       for (const party of row.payload?.parties ?? []) {
         const key = `${party}__${samplingDate}__${mark}`;
         const existing = groups.get(key);
+        const partyFollowUpDue = row.payload?.party_follow_ups?.find((entry) => entry.party === party)?.follow_up_due_date ?? rowFollowUpDueDate;
         if (existing) {
           existing.lot_numbers.add(lotNo);
           existing.grades.add(grade);
+          if (partyFollowUpDue) existing.follow_up_due_dates.add(partyFollowUpDue);
           if (remarks) existing.remarks.add(remarks);
           if (row.performed_at > existing.performed_at) existing.performed_at = row.performed_at;
         } else {
@@ -566,6 +593,7 @@ export default function SamplingPage() {
             sampling_date: samplingDate,
             lot_numbers: new Set([lotNo]),
             grades: new Set([grade]),
+            follow_up_due_dates: partyFollowUpDue ? new Set([partyFollowUpDue]) : new Set<string>(),
             remarks: remarks ? new Set([remarks]) : new Set<string>(),
             performed_at: row.performed_at
           });
@@ -581,6 +609,7 @@ export default function SamplingPage() {
         sampling_date: value.sampling_date,
         lot_numbers: Array.from(value.lot_numbers).sort((a, b) => a.localeCompare(b)),
         grades: Array.from(value.grades).sort((a, b) => a.localeCompare(b)).join(", "),
+        follow_up_due: Array.from(value.follow_up_due_dates).sort((a, b) => a.localeCompare(b)).join(" | ") || "-",
         remarks: Array.from(value.remarks).join(" | ") || "-",
         performed_at: value.performed_at
       }))
@@ -656,6 +685,12 @@ export default function SamplingPage() {
       render: (_, row) => row.payload?.sampling_date ?? "-"
     },
     {
+      title: "Follow-up Due",
+      key: "follow_up_due",
+      render: (_, row) => row.payload?.follow_up_due_date ?? "-",
+      responsive: ["md"]
+    },
+    {
       title: (
         <HeaderMenuFilter
           label="Parties"
@@ -689,22 +724,25 @@ export default function SamplingPage() {
       title: "Action",
       key: "action_delete",
       width: 130,
-      render: (_, row) => (
-        <Popconfirm
-          title="Delete this action only?"
-          description="Lot will remain. Only latest action can be deleted."
-          okText="Delete Action"
-          okButtonProps={{ danger: true, loading: deleteSamplingAction.isPending }}
-          cancelText="Cancel"
-          onConfirm={async () => {
-            await deleteSamplingAction.mutateAsync({ lotId: row.lot_id, actionId: row.id });
-          }}
-        >
-          <Button size="small" danger>
-            Delete Action
-          </Button>
-        </Popconfirm>
-      )
+      render: (_, row) =>
+        row.action_id ? (
+          <Popconfirm
+            title="Delete this action only?"
+            description="Lot will remain. Only latest action can be deleted."
+            okText="Delete Action"
+            okButtonProps={{ danger: true, loading: deleteSamplingAction.isPending }}
+            cancelText="Cancel"
+            onConfirm={async () => {
+              await deleteSamplingAction.mutateAsync({ lotId: row.lot_id, actionId: row.action_id ?? row.id });
+            }}
+          >
+            <Button size="small" danger>
+              Delete Action
+            </Button>
+          </Popconfirm>
+        ) : (
+          <Typography.Text type="secondary">-</Typography.Text>
+        )
     }
   ];
 
@@ -736,6 +774,11 @@ export default function SamplingPage() {
       ),
       dataIndex: "sampling_date",
       key: "sampling_date"
+    },
+    {
+      title: "Follow-up Due",
+      dataIndex: "follow_up_due",
+      key: "follow_up_due"
     },
     {
       title: (
@@ -803,7 +846,8 @@ export default function SamplingPage() {
               onClick={() => {
                 setIsAddingNew(true);
                 setBatchSamplingDate(todayIsoDate());
-                setDraftRows([{ id: createRowId(), party: "", mark: "", lotIds: [], lotNumbers: [] }]);
+                setBatchFollowUpDueDate("");
+                setDraftRows([{ id: createRowId(), party: "", mark: "", lotIds: [], lotNumbers: [], lotExpectedUpdatedAtById: {} }]);
                 setLotModalMark("");
                 setHistoryPanelOpen(false);
                 setHistoryParty("");
@@ -832,6 +876,13 @@ export default function SamplingPage() {
                     style={{ width: 170 }}
                     onChange={(e) => setBatchSamplingDate(e.target.value)}
                   />
+                  <Typography.Text strong>Follow-up Due</Typography.Text>
+                  <Input
+                    type="date"
+                    value={batchFollowUpDueDate}
+                    style={{ width: 170 }}
+                    onChange={(e) => setBatchFollowUpDueDate(e.target.value)}
+                  />
                 </Space>
               </Space>
               <Table
@@ -846,7 +897,10 @@ export default function SamplingPage() {
                 <Space>
                   <Button
                     onClick={() =>
-                      setDraftRows((prev) => [...prev, { id: createRowId(), party: "", mark: "", lotIds: [], lotNumbers: [] }])
+                      setDraftRows((prev) => [
+                        ...prev,
+                        { id: createRowId(), party: "", mark: "", lotIds: [], lotNumbers: [], lotExpectedUpdatedAtById: {} }
+                      ])
                     }
                   >
                     Add another row
@@ -900,13 +954,19 @@ export default function SamplingPage() {
           onOk={() => {
             if (!activeDraftRow) return;
             const selectedLotNoById = new Map((selectableLots ?? []).map((lot) => [lot.id, lot.invoice_number]));
+            const selectedLotUpdatedAtById = new Map((selectableLots ?? []).map((lot) => [lot.id, lot.updated_at]));
             setDraftRows((prev) =>
               prev.map((row) =>
                 row.id === activeDraftRow.id
                   ? {
                       ...row,
                       lotIds: lotModalSelectedKeys,
-                      lotNumbers: lotModalSelectedKeys.map((id) => selectedLotNoById.get(id) ?? id)
+                      lotNumbers: lotModalSelectedKeys.map((id) => selectedLotNoById.get(id) ?? id),
+                      lotExpectedUpdatedAtById: Object.fromEntries(
+                        lotModalSelectedKeys
+                          .map((lotId) => [lotId, selectedLotUpdatedAtById.get(lotId) ?? ""])
+                          .filter((entry) => Boolean(entry[1]))
+                      )
                     }
                   : row
               )

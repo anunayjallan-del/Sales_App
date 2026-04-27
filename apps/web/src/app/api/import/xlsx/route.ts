@@ -5,7 +5,7 @@ import {
   createSyncRun,
   insertSyncErrors,
   updateSyncRun,
-  upsertLotStructural
+  upsertLotStructuralViaRpc
 } from "@/server/repositories/lots-repo";
 import { mapRowsToLotStructural, parseXlsxLots } from "@/server/services/xlsx-import";
 
@@ -53,7 +53,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    const result = await upsertLotStructural(mapped);
+    const result = await upsertLotStructuralViaRpc(mapped);
 
     await updateSyncRun(run.id, {
       status: "COMPLETED",

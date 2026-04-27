@@ -150,9 +150,11 @@ function normalizeBuyerList(input: unknown): string[] {
 
 const negotiatingSchema = z
   .object({
+    broker: z.string().trim().min(1),
     buyer: z.string().optional(),
     buyers: z.array(z.string()).optional(),
-    negotiation_date: z.string().trim().min(1)
+    negotiation_date: z.string().trim().min(1),
+    remarks: z.string().optional()
   })
   .superRefine((value, ctx) => {
     const normalized = [...normalizeBuyerList(value.buyers), ...normalizeBuyerList(value.buyer)];
@@ -165,8 +167,10 @@ const negotiatingSchema = z
     }
   })
   .transform((value) => ({
+    broker: value.broker.trim(),
     buyers: Array.from(new Set([...normalizeBuyerList(value.buyers), ...normalizeBuyerList(value.buyer)])),
-    negotiation_date: value.negotiation_date
+    negotiation_date: value.negotiation_date,
+    ...(value.remarks ? { remarks: value.remarks } : {})
   }));
 
 export const actionRules: Record<LotActionName, ActionRule> = {
@@ -176,6 +180,7 @@ export const actionRules: Record<LotActionName, ActionRule> = {
     schema: z.object({
       parties: z.array(z.string().min(1)).min(1),
       sampling_date: z.string().min(1),
+      follow_up_due_date: z.string().optional(),
       ...commonRemark
     })
   },

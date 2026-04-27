@@ -1,6 +1,8 @@
 -- Rebuild active statuses into parallel auction/private lanes from best available history.
 -- Keeps lot_actions history intact; only rematerializes lot_active_statuses.
 
+delete from public.lot_active_statuses;
+
 with latest_auction_action as (
   select distinct on (la.lot_id)
     la.lot_id,
@@ -147,8 +149,6 @@ final_statuses as (
     end as statuses
   from resolved r
 )
-delete from public.lot_active_statuses;
-
 insert into public.lot_active_statuses (lot_id, status, since_at)
 select
   fs.lot_id,

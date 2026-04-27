@@ -14,10 +14,9 @@ coverage
 
 # TypeScript incremental build cache
 **/*.tsbuildinfo
-
 # Generated local output
 output/
 
 # Supabase local temp state
-supabase/.temp/*
-!supabase/.temp/.gitkeep
+supabase/.temp/
+

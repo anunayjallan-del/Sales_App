@@ -20,6 +20,7 @@ type LotRow = {
   bags: number;
   net_weight_kg: number;
   date_created: string;
+  updated_at?: string;
   is_cancelled: boolean;
   lifecycle_status?: string;
   active_statuses?: string[];
@@ -194,6 +195,7 @@ const actionFieldConfig: Record<ActionName, ActionField[]> = {
 };
 
 const actionNameSet = new Set<ActionName>(Object.keys(actionFieldConfig) as ActionName[]);
+const actionsRequiringExpectedLotUpdatedAt = new Set<ActionName>(["SAMPLING", "NEGOTIATING"]);
 const privateCommitmentActions = new Set<ActionName>(["SOLD_PENDING_DISPATCH", "SOLD_PRIVATE"]);
 const auctionStatusesEarlyStage = new Set<string>(["PENDING_AUCTION_DISPATCH", "IN_TRANSIT"]);
 const auctionStatusesMiddleStage1 = new Set<string>(["AWR_PENDING"]);
@@ -215,6 +217,36 @@ const conflictPromptOrder: ConflictPromptType[] = [
   "MIDDLE_STAGE_2_GUIDANCE",
   "LATER_STAGE_GUIDANCE"
 ];
+
+export function actionRequiresExpectedLotUpdatedAt(action: ActionName): boolean {
+  return actionsRequiringExpectedLotUpdatedAt.has(action);
+}
+
+export function resolveExpectedLotUpdatedAt(action: ActionName, updatedAt: string | null | undefined): string {
+  if (!actionRequiresExpectedLotUpdatedAt(action)) return "";
+  return String(updatedAt ?? "").trim();
+}
+
+type BuildLotActionRequestBodyInput = {
+  action: ActionName;
+  data: Record<string, unknown>;
+  expectedLotUpdatedAt?: string;
+  conflictAcknowledged?: boolean;
+  conflictPromptType?: ConflictPromptType;
+  conflictAcknowledgedAt?: string;
+};
+
+export function buildLotActionRequestBody(input: BuildLotActionRequestBodyInput): Record<string, unknown> {
+  const expectedLotUpdatedAt = resolveExpectedLotUpdatedAt(input.action, input.expectedLotUpdatedAt);
+  return {
+    action: input.action,
+    data: input.data,
+    expected_lot_updated_at: expectedLotUpdatedAt || undefined,
+    conflict_acknowledged: input.conflictAcknowledged,
+    conflict_prompt_type: input.conflictPromptType,
+    conflict_acknowledged_at: input.conflictAcknowledgedAt
+  };
+}
 const MARK_FILTER_SEQUENCE = [
   { key: "FURKATING", label: "Furkating" },
   { key: "ABHOYJAN", label: "Abhoyjan" },
@@ -667,19 +699,23 @@ export function LotsClient() {
       lotId: string;
       action: ActionName;
       data: Record<string, unknown>;
+      expectedLotUpdatedAt?: string;
       conflictAcknowledged?: boolean;
       conflictPromptType?: ConflictPromptType;
       conflictAcknowledgedAt?: string;
     }) =>
       fetchJson<{ warnings?: string[] }>(`/api/lots/${payload.lotId}/actions`, {
         method: "POST",
-        body: JSON.stringify({
-          action: payload.action,
-          data: payload.data,
-          conflict_acknowledged: payload.conflictAcknowledged,
-          conflict_prompt_type: payload.conflictPromptType,
-          conflict_acknowledged_at: payload.conflictAcknowledgedAt
-        })
+        body: JSON.stringify(
+          buildLotActionRequestBody({
+            action: payload.action,
+            data: payload.data,
+            expectedLotUpdatedAt: payload.expectedLotUpdatedAt,
+            conflictAcknowledged: payload.conflictAcknowledged,
+            conflictPromptType: payload.conflictPromptType,
+            conflictAcknowledgedAt: payload.conflictAcknowledgedAt
+          })
+        )
       }),
     onSuccess: async (response) => {
       message.success("Action executed");
@@ -695,16 +731,23 @@ export function LotsClient() {
     mutationFn: async (payload: { lots: LotRow[]; action: ActionName; data: Record<string, unknown> }) =>
       Promise.all(
         payload.lots.map((lot) => {
+          const expectedLotUpdatedAt = resolveExpectedLotUpdatedAt(payload.action, lot.updated_at);
+          if (actionRequiresExpectedLotUpdatedAt(payload.action) && !expectedLotUpdatedAt) {
+            throw new Error(`Missing expected lot version for lot ${lot.invoice_number}. Refresh and retry.`);
+          }
           const conflictMeta = getConflictAckMeta(payload.action, lot.auction_lane_status);
           return fetchJson(`/api/lots/${lot.id}/actions`, {
             method: "POST",
-            body: JSON.stringify({
-              action: payload.action,
-              data: payload.data,
-              conflict_acknowledged: conflictMeta ? true : undefined,
-              conflict_prompt_type: conflictMeta?.promptType,
-              conflict_acknowledged_at: conflictMeta ? new Date().toISOString() : undefined
-            })
+            body: JSON.stringify(
+              buildLotActionRequestBody({
+                action: payload.action,
+                data: payload.data,
+                expectedLotUpdatedAt: expectedLotUpdatedAt || undefined,
+                conflictAcknowledged: conflictMeta ? true : undefined,
+                conflictPromptType: conflictMeta?.promptType,
+                conflictAcknowledgedAt: conflictMeta ? new Date().toISOString() : undefined
+              })
+            )
           });
         })
       ),
@@ -776,6 +819,11 @@ export function LotsClient() {
       message.error(`${missing.label} is required`);
       return;
     }
+    const expectedLotUpdatedAt = resolveExpectedLotUpdatedAt(selectedAction, selectedLotRow.updated_at);
+    if (actionRequiresExpectedLotUpdatedAt(selectedAction) && !expectedLotUpdatedAt) {
+      message.error(`Missing lot version for ${selectedAction.toLowerCase()} action. Refresh and retry.`);
+      return;
+    }
     const conflictMeta = getConflictAckMeta(selectedAction, selectedLotRow.auction_lane_status);
     if (conflictMeta) {
       const acknowledged = await new Promise<boolean>((resolve) => {
@@ -800,6 +848,7 @@ export function LotsClient() {
         lotId: selectedLotId,
         action: selectedAction,
         data: actionData,
+        expectedLotUpdatedAt: expectedLotUpdatedAt || undefined,
         conflictAcknowledged: true,
         conflictPromptType: conflictMeta.promptType,
         conflictAcknowledgedAt: new Date().toISOString()
@@ -809,7 +858,8 @@ export function LotsClient() {
     await runAction.mutateAsync({
       lotId: selectedLotId,
       action: selectedAction,
-      data: actionData
+      data: actionData,
+      expectedLotUpdatedAt: expectedLotUpdatedAt || undefined
     });
   };
 

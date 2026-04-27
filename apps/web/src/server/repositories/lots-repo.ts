@@ -108,6 +108,7 @@ type ReinvoiceSnapshot = {
 
 type NegotiatingSnapshot = {
   negotiating_buyers: string[];
+  negotiating_brokers: string[];
   last_negotiated_on: string | null;
 };
 
@@ -147,6 +148,12 @@ function parseNegotiatingBuyers(payload: unknown): string[] {
   }
   const legacyBuyer = String(record.buyer ?? "").trim();
   return legacyBuyer ? [legacyBuyer] : [];
+}
+
+function parseNegotiatingBroker(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const broker = String((payload as Record<string, unknown>).broker ?? "").trim();
+  return broker || null;
 }
 
 function parseReinvoicedFrom(meta: unknown): string | null {
@@ -218,11 +225,62 @@ async function getReinvoiceSnapshotByLotIds(lotIds: string[]) {
   return result;
 }
 
-async function getNegotiatingSnapshotByLotIds(lotIds: string[]) {
+export async function getNegotiatingSnapshotByLotIds(lotIds: string[]) {
   const result = new Map<string, NegotiatingSnapshot>();
   if (!lotIds.length) return result;
 
   const chunkSize = 200;
+  let hasStructuredRows = false;
+
+  for (let i = 0; i < lotIds.length; i += chunkSize) {
+    const chunk = lotIds.slice(i, i + chunkSize);
+    const { data, error } = await db()
+      .from("private_deals")
+      .select(
+        "lot_id,negotiation_date,created_at,buyer_party:parties!private_deals_buyer_party_id_fkey(name),broker_party:parties!private_deals_broker_party_id_fkey(name),buyer:buyers(name)"
+      )
+      .eq("status", "NEGOTIATING")
+      .in("lot_id", chunk);
+    if (error) throw error;
+
+    for (const row of data ?? []) {
+      const lotId = String(row.lot_id ?? "").trim();
+      const buyerName =
+        String((row.buyer_party as { name?: unknown } | null)?.name ?? "").trim() ||
+        String((row.buyer as { name?: unknown } | null)?.name ?? "").trim();
+      const brokerName = String((row.broker_party as { name?: unknown } | null)?.name ?? "").trim();
+      if (!lotId || !buyerName) continue;
+
+      hasStructuredRows = true;
+      const negotiatedOn = normalizeIsoDate(row.negotiation_date) ?? normalizeIsoDate(row.created_at);
+      const existing = result.get(lotId);
+      if (!existing) {
+        result.set(lotId, {
+          negotiating_buyers: [buyerName],
+          negotiating_brokers: brokerName ? [brokerName] : [],
+          last_negotiated_on: negotiatedOn
+        });
+        continue;
+      }
+
+      const nextBuyers = Array.from(new Set([...existing.negotiating_buyers, buyerName])).sort((a, b) => a.localeCompare(b));
+      const nextBrokers = brokerName
+        ? Array.from(new Set([...existing.negotiating_brokers, brokerName])).sort((a, b) => a.localeCompare(b))
+        : existing.negotiating_brokers;
+      const nextDate = negotiatedOn ?? "";
+      const existingDate = existing.last_negotiated_on ?? "";
+      result.set(lotId, {
+        negotiating_buyers: nextBuyers,
+        negotiating_brokers: nextBrokers,
+        last_negotiated_on: nextDate > existingDate ? negotiatedOn : existing.last_negotiated_on
+      });
+    }
+  }
+
+  if (hasStructuredRows) {
+    return result;
+  }
+
   for (let i = 0; i < lotIds.length; i += chunkSize) {
     const chunk = lotIds.slice(i, i + chunkSize);
     const { data, error } = await db()
@@ -234,24 +292,36 @@ async function getNegotiatingSnapshotByLotIds(lotIds: string[]) {
     for (const row of data ?? []) {
       const lotId = String(row.lot_id);
       const buyers = parseNegotiatingBuyers(row.payload);
+      const broker = parseNegotiatingBroker(row.payload);
       if (!buyers.length) continue;
       const negotiatedOn =
         normalizeIsoDate((row.payload as Record<string, unknown> | null)?.negotiation_date) ??
         normalizeIsoDate(row.performed_at);
       const existing = result.get(lotId);
       if (!existing) {
-        result.set(lotId, { negotiating_buyers: buyers, last_negotiated_on: negotiatedOn });
+        result.set(lotId, {
+          negotiating_buyers: buyers,
+          negotiating_brokers: broker ? [broker] : [],
+          last_negotiated_on: negotiatedOn
+        });
         continue;
       }
       const existingDate = existing.last_negotiated_on ?? "";
       const nextDate = negotiatedOn ?? "";
       if (nextDate > existingDate) {
-        result.set(lotId, { negotiating_buyers: buyers, last_negotiated_on: negotiatedOn });
+        result.set(lotId, {
+          negotiating_buyers: buyers,
+          negotiating_brokers: broker ? [broker] : existing.negotiating_brokers,
+          last_negotiated_on: negotiatedOn
+        });
       } else if (nextDate === existingDate) {
         result.set(lotId, {
           negotiating_buyers: Array.from(new Set([...existing.negotiating_buyers, ...buyers])).sort((a, b) =>
             a.localeCompare(b)
           ),
+          negotiating_brokers: broker
+            ? Array.from(new Set([...existing.negotiating_brokers, broker])).sort((a, b) => a.localeCompare(b))
+            : existing.negotiating_brokers,
           last_negotiated_on: existing.last_negotiated_on
         });
       }
@@ -435,6 +505,7 @@ export async function listLots(filters: {
         }),
         ...(negotiatingByLot.get(String(lot.id)) ?? {
           negotiating_buyers: [],
+          negotiating_brokers: [],
           last_negotiated_on: null
         }),
         ...(reinvoiceByLot.get(String(lot.id)) ?? {
@@ -496,6 +567,7 @@ export async function listLots(filters: {
       }),
       ...(negotiatingByLot.get(String(lot.id)) ?? {
         negotiating_buyers: [],
+        negotiating_brokers: [],
         last_negotiated_on: null
       }),
       ...(reinvoiceByLot.get(String(lot.id)) ?? {
@@ -548,6 +620,7 @@ export async function getLotWithRelations(lotId: string) {
     await getNegotiatingSnapshotByLotIds([lotId])
   ).get(lotId) ?? {
     negotiating_buyers: [],
+    negotiating_brokers: [],
     last_negotiated_on: null
   };
   return {
@@ -585,12 +658,22 @@ export async function updateAuctionTrack(lotId: string, patch: Record<string, un
 }
 
 export async function createPrivateDeal(payload: Record<string, unknown>) {
+  const normalizedStatus = String(payload.status ?? "").trim().toUpperCase();
+  if (normalizedStatus === "NEGOTIATING" || normalizedStatus === "SAMPLING_SENT") {
+    throw new Error("Use lot action RPC flow for NEGOTIATING and SAMPLING states.");
+  }
+
   const { data, error } = await db().from("private_deals").insert(payload).select("*").single();
   if (error) throw error;
   return data;
 }
 
 export async function patchPrivateDeal(id: string, payload: Record<string, unknown>) {
+  const normalizedStatus = String(payload.status ?? "").trim().toUpperCase();
+  if (normalizedStatus === "NEGOTIATING" || normalizedStatus === "SAMPLING_SENT") {
+    throw new Error("Use lot action RPC flow for NEGOTIATING and SAMPLING states.");
+  }
+
   const { data, error } = await db().from("private_deals").update(payload).eq("id", id).select("*").single();
   if (error) throw error;
   return data;
@@ -753,14 +836,193 @@ export async function getLatestDispatchToAuctionAction(lotId: string) {
   return data;
 }
 
+type SamplingApiRow = {
+  id: string;
+  action_id: string | null;
+  sampling_event_id: string | null;
+  lot_id: string;
+  performed_at: string;
+  payload?: {
+    parties?: string[];
+    sampling_date?: string;
+    follow_up_due_date?: string;
+    party_follow_ups?: Array<{ party: string; follow_up_due_date: string }>;
+    remarks?: string;
+  } | null;
+  lots?: {
+    mark?: string;
+    invoice_number?: string;
+    grade?: string;
+    updated_at?: string;
+  } | null;
+};
+
 export async function listSamplingActions() {
-  const { data, error } = await db()
+  const { data: structuredRows, error: structuredError } = await db()
+    .from("sampling_events")
+    .select(
+      "id,lot_id,sampled_on,remarks,created_at,lots(mark,invoice_number,grade,updated_at),sampling_event_parties(follow_up_due_date,party:parties(name))"
+    )
+    .order("sampled_on", { ascending: false })
+    .order("created_at", { ascending: false });
+  if (structuredError) throw structuredError;
+
+  if ((structuredRows ?? []).length > 0) {
+    const mapped: SamplingApiRow[] = (structuredRows ?? []).map((row) => {
+      const partyRows = Array.isArray(row.sampling_event_parties) ? row.sampling_event_parties : [];
+      const partyFollowUps = partyRows
+        .map((entry) => {
+          const partyName = String((entry as { party?: { name?: unknown } | null }).party?.name ?? "").trim();
+          const followUpDueDate = String((entry as { follow_up_due_date?: unknown }).follow_up_due_date ?? "").trim();
+          if (!partyName || !followUpDueDate) return null;
+          return { party: partyName, follow_up_due_date: followUpDueDate };
+        })
+        .filter((entry): entry is { party: string; follow_up_due_date: string } => Boolean(entry))
+        .sort((a, b) => a.party.localeCompare(b.party));
+
+      const uniqueDueDates = Array.from(new Set(partyFollowUps.map((entry) => entry.follow_up_due_date))).sort((a, b) =>
+        a.localeCompare(b)
+      );
+      const resolvedFollowUpDueDate = uniqueDueDates[0] ?? undefined;
+
+      return {
+        id: String(row.id),
+        action_id: null,
+        sampling_event_id: String(row.id),
+        lot_id: String(row.lot_id),
+        performed_at: String(row.created_at),
+        payload: {
+          parties: partyFollowUps.map((entry) => entry.party),
+          sampling_date: String(row.sampled_on),
+          follow_up_due_date: resolvedFollowUpDueDate,
+          party_follow_ups: partyFollowUps,
+          remarks: row.remarks ? String(row.remarks) : undefined
+        },
+        lots: row.lots
+          ? {
+              mark: String((row.lots as { mark?: unknown }).mark ?? ""),
+              invoice_number: String((row.lots as { invoice_number?: unknown }).invoice_number ?? ""),
+              grade: String((row.lots as { grade?: unknown }).grade ?? ""),
+              updated_at: String((row.lots as { updated_at?: unknown }).updated_at ?? "")
+            }
+          : null
+      };
+    });
+    return mapped;
+  }
+
+  const { data: legacyRows, error: legacyError } = await db()
     .from("lot_actions")
-    .select("id,lot_id,action,payload,performed_at,lots(mark,invoice_number,grade)")
+    .select("id,lot_id,action,payload,performed_at,lots(mark,invoice_number,grade,updated_at)")
     .eq("action", "SAMPLING")
     .order("performed_at", { ascending: false });
+  if (legacyError) throw legacyError;
+
+  return (legacyRows ?? []).map((row) => ({
+    id: String(row.id),
+    action_id: String(row.id),
+    sampling_event_id: null,
+    lot_id: String(row.lot_id),
+    performed_at: String(row.performed_at),
+    payload: row.payload as SamplingApiRow["payload"],
+    lots: row.lots
+      ? {
+          mark: String((row.lots as { mark?: unknown }).mark ?? ""),
+          invoice_number: String((row.lots as { invoice_number?: unknown }).invoice_number ?? ""),
+          grade: String((row.lots as { grade?: unknown }).grade ?? ""),
+          updated_at: String((row.lots as { updated_at?: unknown }).updated_at ?? "")
+        }
+      : null
+  }));
+}
+
+type Slice1SamplingInput = {
+  lot_id: string;
+  expected_lot_updated_at: string;
+  parties: string[];
+  sampling_date: string;
+  follow_up_due_date?: string;
+  remarks?: string;
+};
+
+type Slice1SamplingWriteResult = {
+  action_id: string;
+  sampling_event_id: string;
+  resolved_follow_up_due_date: string;
+  lot_updated_at: string;
+};
+
+export async function recordSamplingViaRpc(input: Slice1SamplingInput): Promise<Slice1SamplingWriteResult> {
+  const { data, error } = await db().rpc("slice1_record_sampling", {
+    p_lot_id: input.lot_id,
+    p_expected_lot_updated_at: input.expected_lot_updated_at,
+    p_parties: input.parties,
+    p_sampling_date: input.sampling_date,
+    p_follow_up_due_date: input.follow_up_due_date ?? null,
+    p_remarks: input.remarks ?? null
+  });
   if (error) throw error;
-  return data ?? [];
+
+  const first = Array.isArray(data) ? data[0] : data;
+  const actionId = String((first as { action_id?: unknown } | null)?.action_id ?? "").trim();
+  const samplingEventId = String((first as { sampling_event_id?: unknown } | null)?.sampling_event_id ?? "").trim();
+  const resolvedFollowUpDueDate = String(
+    (first as { resolved_follow_up_due_date?: unknown } | null)?.resolved_follow_up_due_date ?? ""
+  ).trim();
+  const lotUpdatedAt = String((first as { lot_updated_at?: unknown } | null)?.lot_updated_at ?? "").trim();
+
+  if (!actionId || !samplingEventId || !resolvedFollowUpDueDate || !lotUpdatedAt) {
+    throw new Error("slice1_record_sampling returned an invalid payload.");
+  }
+
+  return {
+    action_id: actionId,
+    sampling_event_id: samplingEventId,
+    resolved_follow_up_due_date: resolvedFollowUpDueDate,
+    lot_updated_at: lotUpdatedAt
+  };
+}
+
+type Slice1NegotiatingInput = {
+  lot_id: string;
+  expected_lot_updated_at: string;
+  broker: string;
+  buyers: string[];
+  negotiation_date: string;
+  remarks?: string;
+};
+
+type Slice1NegotiatingWriteResult = {
+  action_id: string;
+  created_deal_count: number;
+  lot_updated_at: string;
+};
+
+export async function recordNegotiatingViaRpc(input: Slice1NegotiatingInput): Promise<Slice1NegotiatingWriteResult> {
+  const { data, error } = await db().rpc("slice1_record_negotiating", {
+    p_lot_id: input.lot_id,
+    p_expected_lot_updated_at: input.expected_lot_updated_at,
+    p_broker: input.broker,
+    p_buyers: input.buyers,
+    p_negotiation_date: input.negotiation_date,
+    p_remarks: input.remarks ?? null
+  });
+  if (error) throw error;
+
+  const first = Array.isArray(data) ? data[0] : data;
+  const actionId = String((first as { action_id?: unknown } | null)?.action_id ?? "").trim();
+  const createdDealCount = Number((first as { created_deal_count?: unknown } | null)?.created_deal_count ?? NaN);
+  const lotUpdatedAt = String((first as { lot_updated_at?: unknown } | null)?.lot_updated_at ?? "").trim();
+
+  if (!actionId || !Number.isFinite(createdDealCount) || !lotUpdatedAt) {
+    throw new Error("slice1_record_negotiating returned an invalid payload.");
+  }
+
+  return {
+    action_id: actionId,
+    created_deal_count: createdDealCount,
+    lot_updated_at: lotUpdatedAt
+  };
 }
 
 export async function getPrivateDealById(id: string) {
@@ -855,69 +1117,67 @@ export async function getDashboardMetrics() {
   return { lots: lots ?? [], deals: deals ?? [], auctions: auctions ?? [] };
 }
 
-export async function upsertLotStructural(
-  rows: Array<{
-    mark: string;
-    invoice_number: string;
-    grade: string;
-    bags: number;
-    net_weight_kg: number;
-    factory: string | null;
-    date_created: string;
-    is_cancelled: boolean;
-  }>
-) {
+type LotStructuralImportRow = {
+  mark: string;
+  invoice_number: string;
+  grade: string;
+  bags: number;
+  net_weight_kg: number;
+  factory: string | null;
+  date_created: string;
+  is_cancelled: boolean;
+};
+
+type Slice1SafeUpsertResult = {
+  lot_id: string;
+  write_kind: "CREATED" | "UPDATED";
+};
+
+export async function callSlice1SafeUpsertLotStructural(row: LotStructuralImportRow): Promise<Slice1SafeUpsertResult> {
+  const { data, error } = await db().rpc("slice1_safe_upsert_lot_structural", {
+    p_mark: row.mark,
+    p_invoice_number: row.invoice_number,
+    p_grade: row.grade,
+    p_bags: row.bags,
+    p_net_weight_kg: row.net_weight_kg,
+    p_factory: row.factory,
+    p_date_created: row.date_created,
+    p_is_cancelled: row.is_cancelled
+  });
+  if (error) throw error;
+
+  const first = Array.isArray(data) ? data[0] : data;
+  const lotId = String((first as { lot_id?: unknown } | null)?.lot_id ?? "").trim();
+  const writeKind = String((first as { write_kind?: unknown } | null)?.write_kind ?? "")
+    .trim()
+    .toUpperCase();
+
+  if (!lotId || (writeKind !== "CREATED" && writeKind !== "UPDATED")) {
+    throw new Error("slice1_safe_upsert_lot_structural returned an invalid payload.");
+  }
+
+  return { lot_id: lotId, write_kind: writeKind as Slice1SafeUpsertResult["write_kind"] };
+}
+
+export async function upsertLotStructuralViaRpc(rows: LotStructuralImportRow[]) {
   let created = 0;
   let updated = 0;
 
   for (const row of rows) {
-    const { data: existing, error: findError } = await db()
-      .from("lots")
-      .select("id")
-      .eq("mark", row.mark)
-      .eq("invoice_number", row.invoice_number)
-      .maybeSingle();
-    if (findError) throw findError;
-
-    if (!existing) {
-      const { data: inserted, error: insertError } = await db().from("lots").insert({
-        ...row,
-        master_status: "ACTIVE"
-      }).select("id").single();
-      if (insertError) throw insertError;
-      await replaceLotActiveStatuses(inserted.id, [row.is_cancelled ? "CANCELLED" : "PENDING"]);
-      await addLotStatusEvent({
-        lotId: inserted.id,
-        status: row.is_cancelled ? "CANCELLED" : "PENDING",
-        source: "IMPORT",
-        meta: { imported: true }
-      });
+    const rpcResult = await callSlice1SafeUpsertLotStructural(row);
+    if (rpcResult.write_kind === "CREATED") {
       created += 1;
     } else {
-      const { error: updateError } = await db()
-        .from("lots")
-        .update({
-          grade: row.grade,
-          bags: row.bags,
-          net_weight_kg: row.net_weight_kg,
-          factory: row.factory,
-          date_created: row.date_created,
-          is_cancelled: row.is_cancelled
-        })
-        .eq("id", existing.id);
-      if (updateError) throw updateError;
-      await replaceLotActiveStatuses(existing.id, [row.is_cancelled ? "CANCELLED" : "PENDING"]);
-      await addLotStatusEvent({
-        lotId: existing.id,
-        status: row.is_cancelled ? "CANCELLED" : "PENDING",
-        source: "IMPORT",
-        meta: { imported: true, updated: true }
-      });
       updated += 1;
     }
   }
 
   return { created, updated };
+}
+
+// Backward-compatible export name for import flow callers.
+export async function upsertLotStructural(rows: LotStructuralImportRow[]) {
+  return upsertLotStructuralViaRpc(rows);
 }
 
 export async function createSyncRun(payload: Record<string, unknown>) {
@@ -965,12 +1225,14 @@ export async function listLotFilterOptions() {
 }
 
 export async function listPartyOptions() {
-  const [{ data: buyers, error: buyersErr }, { data: actions, error: actionsErr }] = await Promise.all([
+  const [{ data: buyers, error: buyersErr }, { data: actions, error: actionsErr }, { data: parties, error: partiesErr }] = await Promise.all([
     db().from("buyers").select("name").order("name", { ascending: true }),
-    db().from("lot_actions").select("payload")
+    db().from("lot_actions").select("payload"),
+    db().from("parties").select("name,is_buyer,is_broker").order("name", { ascending: true })
   ]);
   if (buyersErr) throw buyersErr;
   if (actionsErr) throw actionsErr;
+  if (partiesErr) throw partiesErr;
 
   const buyerNames = new Set<string>();
   const brokerNames = new Set<string>();
@@ -978,6 +1240,13 @@ export async function listPartyOptions() {
   for (const row of buyers ?? []) {
     const name = String(row.name ?? "").trim();
     if (name) buyerNames.add(name);
+  }
+
+  for (const row of parties ?? []) {
+    const name = String(row.name ?? "").trim();
+    if (!name) continue;
+    if (row.is_buyer) buyerNames.add(name);
+    if (row.is_broker) brokerNames.add(name);
   }
 
   for (const row of actions ?? []) {

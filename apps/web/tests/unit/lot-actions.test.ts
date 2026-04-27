@@ -93,15 +93,18 @@ describe("lot-actions lane model", () => {
 
   it("accepts multiple buyers for negotiating", () => {
     const multi = parseActionPayload("NEGOTIATING", {
+      broker: "Broker A",
       buyers: ["Party A", "Party B"],
       negotiation_date: "2026-02-10"
     });
     expect(multi.success).toBe(true);
     if (!multi.success) return;
+    expect(multi.data.broker).toBe("Broker A");
     expect(multi.data.buyers).toEqual(["Party A", "Party B"]);
     expect(multi.data.negotiation_date).toBe("2026-02-10");
 
     const legacySingle = parseActionPayload("NEGOTIATING", {
+      broker: "Broker B",
       buyer: "Party C",
       negotiation_date: "2026-02-11"
     });
@@ -113,9 +116,18 @@ describe("lot-actions lane model", () => {
 
   it("requires negotiation date for negotiating", () => {
     const missingDate = parseActionPayload("NEGOTIATING", {
+      broker: "Broker A",
       buyers: ["Party A"]
     });
     expect(missingDate.success).toBe(false);
+  });
+
+  it("requires broker for negotiating", () => {
+    const missingBroker = parseActionPayload("NEGOTIATING", {
+      buyers: ["Party A"],
+      negotiation_date: "2026-02-10"
+    });
+    expect(missingBroker.success).toBe(false);
   });
 
   it("allows reserve price action without point of contact", () => {
