@@ -2,18 +2,16 @@
 
 import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import {
-  AlertOutlined,
-  ApartmentOutlined,
-  CheckCircleOutlined,
-  ClockCircleOutlined,
-  DollarOutlined,
-  InboxOutlined,
-  LineChartOutlined,
-  StopOutlined,
-  SwapOutlined,
-  WarningOutlined
-} from "@ant-design/icons";
+import AlertOutlined from "@ant-design/icons/es/icons/AlertOutlined";
+import ApartmentOutlined from "@ant-design/icons/es/icons/ApartmentOutlined";
+import CheckCircleOutlined from "@ant-design/icons/es/icons/CheckCircleOutlined";
+import ClockCircleOutlined from "@ant-design/icons/es/icons/ClockCircleOutlined";
+import DollarOutlined from "@ant-design/icons/es/icons/DollarOutlined";
+import InboxOutlined from "@ant-design/icons/es/icons/InboxOutlined";
+import LineChartOutlined from "@ant-design/icons/es/icons/LineChartOutlined";
+import StopOutlined from "@ant-design/icons/es/icons/StopOutlined";
+import SwapOutlined from "@ant-design/icons/es/icons/SwapOutlined";
+import WarningOutlined from "@ant-design/icons/es/icons/WarningOutlined";
 import { Alert, Card, Col, Empty, Row, Skeleton, Typography } from "antd";
 import { AppShell } from "@/components/app-shell";
 import { fetchJson } from "@/lib/fetcher";

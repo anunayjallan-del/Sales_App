@@ -3,7 +3,9 @@
 import "@ant-design/v5-patch-for-react-19";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { PropsWithChildren, useState } from "react";
-import { App as AntApp, ConfigProvider, theme } from "antd";
+import AntApp from "antd/es/app";
+import ConfigProvider from "antd/es/config-provider";
+import theme from "antd/es/theme";
 
 export function Providers({ children }: PropsWithChildren) {
   const [queryClient] = useState(() => new QueryClient());

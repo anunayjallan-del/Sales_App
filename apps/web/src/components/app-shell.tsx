@@ -3,21 +3,19 @@
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
-import {
-  AppstoreOutlined,
-  BookOutlined,
-  ClockCircleOutlined,
-  DashboardOutlined,
-  ExperimentOutlined,
-  MenuFoldOutlined,
-  MenuOutlined,
-  MenuUnfoldOutlined,
-  SearchOutlined,
-  SettingOutlined,
-  SyncOutlined,
-  TruckOutlined,
-  UploadOutlined
-} from "@ant-design/icons";
+import AppstoreOutlined from "@ant-design/icons/es/icons/AppstoreOutlined";
+import BookOutlined from "@ant-design/icons/es/icons/BookOutlined";
+import ClockCircleOutlined from "@ant-design/icons/es/icons/ClockCircleOutlined";
+import DashboardOutlined from "@ant-design/icons/es/icons/DashboardOutlined";
+import ExperimentOutlined from "@ant-design/icons/es/icons/ExperimentOutlined";
+import MenuFoldOutlined from "@ant-design/icons/es/icons/MenuFoldOutlined";
+import MenuOutlined from "@ant-design/icons/es/icons/MenuOutlined";
+import MenuUnfoldOutlined from "@ant-design/icons/es/icons/MenuUnfoldOutlined";
+import SearchOutlined from "@ant-design/icons/es/icons/SearchOutlined";
+import SettingOutlined from "@ant-design/icons/es/icons/SettingOutlined";
+import SyncOutlined from "@ant-design/icons/es/icons/SyncOutlined";
+import TruckOutlined from "@ant-design/icons/es/icons/TruckOutlined";
+import UploadOutlined from "@ant-design/icons/es/icons/UploadOutlined";
 import { Badge, Button, Drawer, Grid, Input, Layout, Menu, Space, Typography, theme } from "antd";
 
 const links = [
